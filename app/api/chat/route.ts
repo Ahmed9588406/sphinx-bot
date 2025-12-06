@@ -1,0 +1,176 @@
+import { NextResponse } from 'next/server';
+import { createSupabaseClient, handleChat, simpleChat } from '../../../lib/agent';
+import { createClient } from '@supabase/supabase-js';
+
+export const runtime = 'nodejs';
+
+// Get user from token
+async function getUserFromToken(req: Request) {
+  const authHeader = req.headers.get('Authorization');
+  const token = authHeader?.replace('Bearer ', '');
+  
+  if (!token) return null;
+  
+  const url = process.env.SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY || process.env.API_KEY;
+  if (!url || !anonKey) return null;
+  
+  const supabase = createClient(url, anonKey, {
+    global: { headers: { Authorization: `Bearer ${token}` } }
+  });
+  
+  const { data: { user } } = await supabase.auth.getUser();
+  return user;
+}
+
+// Save message to database
+async function saveMessage(
+  supabase: ReturnType<typeof createClient>,
+  conversationId: string,
+  sender: 'user' | 'assistant',
+  content: string,
+  senderId?: string
+) {
+  try {
+    await supabase.from('messages').insert({
+      conversation_id: conversationId,
+      sender,
+      sender_id: senderId || null,
+      content,
+      metadata: {}
+    });
+    
+    // Update conversation's last_message_at
+    await supabase.from('conversations').update({
+      last_message_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }).eq('id', conversationId);
+  } catch (err) {
+    console.error('Failed to save message:', err);
+  }
+}
+
+// Get or create conversation for user
+async function getOrCreateConversation(supabase: ReturnType<typeof createClient>, userId: string) {
+  // Try to get existing open conversation
+  const { data: existing } = await supabase
+    .from('conversations')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'open')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+  
+  if (existing) return existing.id;
+  
+  // Create new conversation
+  const { data: newConv, error } = await supabase
+    .from('conversations')
+    .insert({
+      user_id: userId,
+      title: 'محادثة دعم',
+      status: 'open',
+      metadata: {}
+    })
+    .select('id')
+    .single();
+  
+  if (error) {
+    console.error('Failed to create conversation:', error);
+    return null;
+  }
+  
+  return newConv?.id || null;
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const { message, customerContext, conversationHistory, userId, userName } = body;
+    
+    if (!message || typeof message !== 'string') {
+      return NextResponse.json({ error: 'Missing or invalid message' }, { status: 400 });
+    }
+
+    // Check if ChatAnywhere API key is configured
+    if (!process.env.CHAT_ANYWHERE_API_KEY) {
+      return NextResponse.json({ 
+        error: 'Chat service not configured. Please set CHAT_ANYWHERE_API_KEY in environment.' 
+      }, { status: 500 });
+    }
+
+    // Get authenticated user if token provided
+    const user = await getUserFromToken(req);
+    
+    // Create Supabase client (may be null if not configured)
+    const supabase = createSupabaseClient();
+    
+    // Get or create conversation for authenticated user
+    let conversationId: string | null = null;
+    if (user && supabase) {
+      conversationId = await getOrCreateConversation(supabase, user.id);
+      
+      // Save user message
+      if (conversationId) {
+        await saveMessage(supabase, conversationId, 'user', message, user.id);
+      }
+    }
+    
+    // Use handleChat with RAG if Supabase is configured, otherwise simpleChat
+    let reply: string;
+    let docs: unknown[] = [];
+    
+    if (supabase) {
+      const result = await handleChat(supabase, message, { 
+        customerContext: userName ? `اسم العميل: ${userName}` : customerContext, 
+        conversationHistory 
+      });
+      reply = result.reply;
+      docs = result.docs;
+    } else {
+      // Fallback: simple chat without RAG
+      reply = await simpleChat(message);
+    }
+    
+    // Save assistant reply for authenticated user
+    if (user && supabase && conversationId) {
+      await saveMessage(supabase, conversationId, 'assistant', reply);
+    }
+    
+    return NextResponse.json({ 
+      reply, 
+      docs, 
+      mode: supabase ? 'rag' : 'simple',
+      conversationId 
+    });
+    
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    console.error('API /api/chat error:', errorMessage);
+    
+    // Return user-friendly error messages
+    if (errorMessage.includes('CHAT_ANYWHERE_API_KEY')) {
+      return NextResponse.json({ error: 'Chat service not configured' }, { status: 500 });
+    }
+    if (errorMessage.includes('ChatAnywhere error')) {
+      return NextResponse.json({ error: 'Chat service temporarily unavailable' }, { status: 503 });
+    }
+    
+    return NextResponse.json({ error: 'حصل خطأ، جرب تاني' }, { status: 500 });
+  }
+}
+
+// Health check endpoint
+export async function GET() {
+  const hasApiKey = !!process.env.CHAT_ANYWHERE_API_KEY;
+  const hasSupabase = !!process.env.SUPABASE_URL && !!(process.env.API_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
+  
+  return NextResponse.json({
+    status: hasApiKey ? 'ok' : 'missing_api_key',
+    features: {
+      chat: hasApiKey,
+      rag: hasSupabase
+    }
+  });
+}
