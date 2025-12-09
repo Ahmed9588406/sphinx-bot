@@ -33,7 +33,7 @@ async function saveMessage(
   senderId?: string
 ) {
   try {
-    await supabase.from('messages').insert({
+    await (supabase as any).from('messages').insert({
       conversation_id: conversationId,
       sender,
       sender_id: senderId || null,
@@ -42,7 +42,7 @@ async function saveMessage(
     });
     
     // Update conversation's last_message_at
-    await supabase.from('conversations').update({
+    await (supabase as any).from('conversations').update({
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }).eq('id', conversationId);
@@ -51,13 +51,14 @@ async function saveMessage(
   }
 }
 
+
 // Get or create conversation for user
-async function getOrCreateConversation(supabase: any, userId: string) {
+async function getOrCreateConversation(supabase: any, odUserId: string) {
   // Try to get existing open conversation
-  const { data: existing } = await supabase
+  const { data: existing } = await (supabase as any)
     .from('conversations')
     .select('id')
-    .eq('user_id', userId)
+    .eq('user_id', odUserId)
     .eq('status', 'open')
     .order('created_at', { ascending: false })
     .limit(1)
@@ -66,10 +67,10 @@ async function getOrCreateConversation(supabase: any, userId: string) {
   if (existing) return existing.id;
   
   // Create new conversation
-  const { data: newConv, error } = await supabase
+  const { data: newConv, error } = await (supabase as any)
     .from('conversations')
     .insert({
-      user_id: userId,
+      user_id: odUserId,
       title: 'محادثة دعم',
       status: 'open',
       metadata: {}
@@ -88,7 +89,7 @@ async function getOrCreateConversation(supabase: any, userId: string) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { message, customerContext, conversationHistory, userId, userName, page, offset } = body;
+    const { message, customerContext, conversationHistory, userName, page, offset } = body;
     
     if (!message || typeof message !== 'string') {
       return NextResponse.json({ error: 'Missing or invalid message' }, { status: 400 });
