@@ -25,6 +25,7 @@ export default function ChatWidget({
   const [error, setError] = useState<string | null>(null);
   const [internalConversationId, setInternalConversationId] = useState<string | null>(null);
   const [greeted, setGreeted] = useState(false);
+  const [nextPagingOffset, setNextPagingOffset] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -159,6 +160,8 @@ export default function ChatWidget({
         content: data.reply || 'لم أتمكن من الرد، جرب مرة تانية' 
       };
       setMessages(prev => [...prev, assistantMsg]);
+      // If server returned paging info, keep next offset for 'show more'
+      setNextPagingOffset(data.paging?.nextOffset ?? null);
       
       // Store conversation ID returned from API
       if (data.conversationId) {
@@ -193,7 +196,56 @@ export default function ChatWidget({
     setInternalConversationId(null);
     onConversationChange?.(null);
     setGreeted(false);
+    setNextPagingOffset(null);
     inputRef.current?.focus();
+  };
+
+  // Request more products using paging offset returned from server
+  const requestMore = async (offset: number) => {
+    if (loading) return;
+    setError(null);
+    setLoading(true);
+
+    const userMsg: Message = { role: 'user', content: 'عرض المزيد' };
+    setMessages(prev => [...prev, userMsg]);
+
+    try {
+      const conversationHistory = messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ 
+          message: 'عرض المزيد',
+          conversationHistory,
+          offset,
+          userId: user?.id,
+          userName: user?.name || user?.user_metadata?.name || user?.email?.split('@')[0]
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Error: ${res.status}`);
+
+      const assistantMsg: Message = { role: 'assistant', content: data.reply || 'لم أتمكن من الرد' };
+      setMessages(prev => [...prev, assistantMsg]);
+      setNextPagingOffset(data.paging?.nextOffset ?? null);
+
+      if (data.conversationId) {
+        setInternalConversationId(data.conversationId);
+        onConversationChange?.(data.conversationId);
+        onMessageSent?.();
+      }
+    } catch (err: any) {
+      const errorMessage = err.message || 'حصل خطأ في الاتصال';
+      setError(errorMessage);
+      setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ ${errorMessage}` }]);
+    } finally {
+      setLoading(false);
+      inputRef.current?.focus();
+    }
   };
 
   // Show loading while checking auth

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "./context/AuthContext";
+import ClientShell from './components/ClientShell';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,6 +31,8 @@ export default function RootLayout({
       >
         <AuthProvider>
           {children}
+          {/* Client-side shell renders floating chat button and modal */}
+          <ClientShell />
         </AuthProvider>
       </body>
     </html>

@@ -161,11 +161,12 @@ export async function getAllProducts(supabase: SupabaseClient | null, limit = 20
   if (!supabase) return [];
   
   try {
+    const resolvedLimit = Number(process.env.PRODUCT_LIST_LIMIT || limit || 100);
     const { data, error } = await supabase
       .from('products')
-      .select('id, title, description, price, currency, tags')
+      .select('id, title, description, price, currency, tags, product_images(*)')
       .order('created_at', { ascending: false })
-      .limit(limit);
+      .limit(resolvedLimit);
     
     if (error) {
       console.error('getAllProducts error:', error.message);
@@ -174,6 +175,41 @@ export async function getAllProducts(supabase: SupabaseClient | null, limit = 20
     return data || [];
   } catch (err: any) {
     console.error('getAllProducts error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * getAllProductsAll
+ * - Fetches ALL products by paging through results in batches.
+ * - Use with caution for very large catalogs. Batch size is configurable via env PRODUCT_PAGE_SIZE.
+ */
+export async function getAllProductsAll(supabase: SupabaseClient | null) {
+  if (!supabase) return [];
+
+  try {
+    const pageSize = Number(process.env.PRODUCT_PAGE_SIZE || 200);
+    let offset = 0;
+    const all: any[] = [];
+
+    while (true) {
+      const { data, error } = await supabase
+        .from('products')
+        .select('id, title, description, price, currency, tags, product_images(*)')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + pageSize - 1);
+
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+
+      all.push(...data);
+      if (data.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    return all;
+  } catch (err: any) {
+    console.error('getAllProductsAll error:', err.message || err);
     return [];
   }
 }
@@ -229,8 +265,8 @@ export async function callChatAnywhere(messages: ChatMessage[], model?: string):
 export async function handleChat(
   supabase: SupabaseClient | null, 
   userMessage: string, 
-  options?: { customerContext?: string; conversationHistory?: ChatMessage[] }
-): Promise<{ reply: string; docs: any[] }> {
+  options?: { customerContext?: string; conversationHistory?: ChatMessage[]; userId?: string; userName?: string; page?: number; offset?: number }
+): Promise<any> {
   
   // Detect if user is asking to list all products
   const productListingKeywords = [
@@ -245,14 +281,54 @@ export async function handleChat(
 
   // 1. Get context based on query type
   let docs: any[] = [];
-  let products: any[] = [];
+  const products: any[] = [];
   
   try {
+    // For product listing queries, support paging so replies are not enormous.
     if (isProductListingQuery && supabase) {
-      // Fetch all products directly for listing queries
-      products = await getAllProducts(supabase, 20);
+      const pageSize = Number(process.env.PRODUCT_LIST_REPLY_PAGE_SIZE || 20);
+      const offset = typeof options?.offset === 'number' ? options!.offset : (typeof options?.page === 'number' ? (Math.max(1, options!.page) - 1) * pageSize : 0);
+
+      // Get total count (efficient small query)
+      const countRes = await supabase.from('products').select('id', { count: 'exact', head: true });
+      const total = typeof countRes.count === 'number' ? countRes.count : null;
+
+      // Fetch the requested page
+      const { data: pageData, error: pageErr } = await supabase
+        .from('products')
+        .select('id, title, description, price, currency, tags, product_images(*)')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + pageSize - 1);
+
+      if (pageErr) throw pageErr;
+
+      // Also fetch small set of vector docs for additional context
+      try { docs = await querySimilar(supabase, userMessage, 5); } catch (e) { docs = []; }
+
+      // Build a plain-text listing for this page with full descriptions
+      const lines: string[] = [];
+      lines.push(`قائمة المنتجات (${offset + 1}${pageData && pageData.length ? ` - ${offset + pageData.length}` : ''}${total ? ` من ${total}` : ''}):`);
+      lines.push('');
+      (pageData || []).forEach((p: any, i: number) => {
+        const idx = offset + i + 1;
+        const title = p.title || 'No title';
+        const price = p.price ? `${p.price} ${p.currency || 'EGP'}` : '';
+        const desc = p.description ? ` - ${String(p.description).replace(/\s+/g, ' ')}` : '';
+        lines.push(`${idx}. ${title}${price ? ` — ${price}` : ''}${desc}`);
+      });
+
+      // Provide instruction for fetching next page
+      const nextOffset = total && offset + pageSize < total ? offset + pageSize : null;
+      if (nextOffset !== null) {
+        lines.push('');
+        lines.push(`للمزيد اكتب "عرض المزيد" أو أرسل الطلب مع { "offset": ${nextOffset} }`);
+      }
+
+      const replyText = lines.join('\n');
+      return { reply: replyText, docs: pageData || [], paging: { offset, pageSize, total, nextOffset } } as any;
     }
-    // Also try vector search for additional context
+
+    // Non-listing queries: also try vector search for additional context
     docs = await querySimilar(supabase, userMessage, 5);
   } catch (err) {
     console.warn('Could not query docs/products, continuing without RAG');
@@ -325,7 +401,115 @@ export async function handleChat(
   // 5. Call ChatAnywhere
   const reply = await callChatAnywhere(messages);
   
+  // 6. Try to detect an order intent and extract order details using the LLM
+  try {
+    const orderDetails = await extractOrderDetails(userMessage);
+    // If we found items and have a supabase client and userId, create a DRAFT order and ask for confirmation
+    if (orderDetails && Array.isArray(orderDetails.items) && orderDetails.items.length > 0 && supabase && options?.userId) {
+      // Build order items with product ids/prices when possible
+      const itemsWithPrices = await Promise.all(orderDetails.items.map(async (it: any) => {
+        // try to find product by title in fetched products
+        const found = (products || []).find(p => p.title && String(p.title).toLowerCase().includes(String(it.product_title || it.title || '').toLowerCase()));
+        return {
+          product_title: it.product_title || it.title,
+          product_id: found?.id || null,
+          quantity: Number(it.quantity || 1),
+          unit_price: found?.price || Number(it.unit_price || 0)
+        };
+      }));
+
+      const total = itemsWithPrices.reduce((s: number, it: any) => s + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
+
+      // generate human-friendly order number
+      const orderNumber = `SFX-${Date.now().toString(36)}-${Math.floor(Math.random() * 9000) + 1000}`;
+
+      const draftRecord: any = {
+        user_id: options.userId,
+        status: 'draft',
+        total: total,
+        currency: 'EGP',
+        shipping_address: orderDetails.shipping || null,
+        metadata: {
+          created_via: 'chat-assistant',
+          customer_name: options.userName || null,
+          order_number: orderNumber
+        }
+      };
+
+      const { data: draftOrder, error: draftError } = await supabase.from('orders').insert(draftRecord).select().single();
+      if (!draftError && draftOrder) {
+        // Insert order_items rows for the draft
+        const orderItems = itemsWithPrices.map((it: any) => ({
+          order_id: draftOrder.id,
+          product_id: it.product_id,
+          quantity: it.quantity,
+          price: it.unit_price || 0,
+          metadata: {}
+        }));
+        try {
+          await supabase.from('order_items').insert(orderItems);
+        } catch (e) {
+          // ignore if table doesn't exist
+        }
+
+        // Prepare a draft receipt text
+        const receiptLines = [] as string[];
+        receiptLines.push(`Draft Order ID: ${draftOrder.id}`);
+        receiptLines.push('Items:');
+        itemsWithPrices.forEach((it: any, idx: number) => {
+          receiptLines.push(`${idx + 1}. ${it.product_title} x${it.quantity} — ${it.unit_price || 0} EGP`);
+        });
+        receiptLines.push(`Total: ${total} EGP`);
+        if (orderDetails.shipping) {
+          receiptLines.push('Shipping:');
+          if (orderDetails.shipping.name) receiptLines.push(`Name: ${orderDetails.shipping.name}`);
+          if (orderDetails.shipping.phone) receiptLines.push(`Phone: ${orderDetails.shipping.phone}`);
+          if (orderDetails.shipping.address) receiptLines.push(`Address: ${orderDetails.shipping.address}`);
+        }
+
+        const receiptText = receiptLines.join('\n');
+
+        // Ask the user to confirm the draft order
+        const confirmPrompt = `انا جهزت طلب مؤقت برقم ${draftOrder.id} بمجموع ${total} EGP. عايز تأكد الطلب؟ (اكتب "نعم" للتأكيد أو "لا" للإلغاء)`;
+        const finalReply = reply + '\n\n' + confirmPrompt;
+
+        return { reply: finalReply, docs: products.length > 0 ? products : docs, draftOrder, receipt: receiptText } as any;
+      }
+    }
+  } catch (e) {
+    console.warn('Order extraction/creation failed:', e instanceof Error ? e.message : String(e));
+  }
+
   return { reply, docs: products.length > 0 ? products : docs };
+}
+
+/**
+ * extractOrderDetails
+ * Asks the LLM to extract structured order information from a free-text user message.
+ * Returns: { items: [{ product_title, quantity, unit_price? }], shipping?: { name, address, phone } }
+ */
+export async function extractOrderDetails(userMessage: string) {
+  // Build a small prompt that asks for JSON only
+  const prompt = `Extract order details from the user's message as JSON.
+Return exactly JSON with this shape: { "items": [ { "product_title": string, "quantity": number, "unit_price": number | null } ], "shipping": { "name": string | null, "phone": string | null, "address": string | null } }
+
+If you cannot extract any items, return: { "items": [] }
+
+User message:\n${userMessage}\n\nJSON:`;
+
+  const raw = await callChatAnywhere([{ role: 'system', content: 'You are a JSON extraction assistant. Respond ONLY with valid JSON.' }, { role: 'user', content: prompt }], process.env.CHAT_MODEL || undefined);
+  // Try to parse JSON from response
+  try {
+    const j = JSON.parse(raw.trim());
+    return j;
+  } catch (err) {
+    // Try to extract JSON substring
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m) {
+      try { return JSON.parse(m[0]); } catch (e) { return { items: [] }; }
+    }
+    return { items: [] };
+  }
 }
 
 /**

@@ -47,6 +47,7 @@ const initialFormData: FormData = {
 
 export default function ProductsAdminPage() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [totalCount, setTotalCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [regenerating, setRegenerating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -57,10 +58,12 @@ export default function ProductsAdminPage() {
 
   const fetchProducts = useCallback(async () => {
     try {
-      const res = await fetch('/api/products');
+      // Request a large limit so the admin sees all products
+      const res = await fetch('/api/products?limit=1000');
       const data = await res.json();
       if (data.products) {
         setProducts(data.products);
+        setTotalCount(typeof data.total === 'number' ? data.total : (Array.isArray(data.products) ? data.products.length : null));
       }
     } catch (err) {
       console.error('Failed to fetch products:', err);
@@ -469,17 +472,25 @@ export default function ProductsAdminPage() {
         {/* Products List */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200">
           <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-            <h2 className="font-semibold text-slate-800">المنتجات ({filteredProducts.length})</h2>
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="بحث..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="pl-10 pr-4 py-2 rounded-lg border border-slate-300 text-sm focus:border-emerald-500 outline-none w-64"
-                dir="auto"
-              />
+            <div className="flex items-center gap-4">
+              <h2 className="font-semibold text-slate-800">المنتجات</h2>
+              <div className="text-sm text-slate-500">{totalCount !== null ? `إجمالي المنتجات: ${totalCount}` : ''}</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button onClick={() => { setLoading(true); fetchProducts(); }} title="تحديث" className="p-2 rounded-lg hover:bg-slate-50">
+                <RefreshCw className="w-4 h-4 text-slate-600" />
+              </button>
+              <div className="relative">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="بحث..."
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  className="pl-10 pr-4 py-2 rounded-lg border border-slate-300 text-sm focus:border-emerald-500 outline-none w-64"
+                  dir="auto"
+                />
+              </div>
             </div>
           </div>
 
