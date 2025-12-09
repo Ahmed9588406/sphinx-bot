@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from './context/AuthContext';
 import ChatWidget from "./components/ChatWidget";
 import ConversationSidebar from "./components/ConversationSidebar";
+import ChatModal from "./components/ChatModal";
 import Link from "next/link";
 import { LogOut, Settings, Loader2, Menu, X } from "lucide-react";
 
@@ -14,6 +15,7 @@ export default function Home() {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -73,6 +75,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-100 to-slate-200 flex flex-col">
+      <ChatModal open={chatOpen} onClose={() => setChatOpen(false)} />
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-slate-200 z-10">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -96,11 +99,24 @@ export default function Home() {
           
           <div className="flex items-center gap-2 sm:gap-4">
             <Link 
+              href="/products" 
+              className="text-sm text-slate-600 hover:text-emerald-600 transition-colors flex items-center gap-1 p-2 rounded-lg hover:bg-slate-100"
+            >
+              <span className="hidden sm:inline">المنتجات</span>
+            </Link>
+            <button
+              onClick={() => setChatOpen(true)}
+              className="text-sm text-slate-600 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-slate-100"
+              title="فتح الدردشة"
+            >
+              دردش
+            </button>
+            <Link 
               href="/admin/products" 
               className="text-sm text-slate-600 hover:text-emerald-600 transition-colors flex items-center gap-1 p-2 rounded-lg hover:bg-slate-100"
             >
               <Settings className="w-4 h-4" />
-              <span className="hidden sm:inline">إدارة المنتجات</span>
+              <span className="hidden sm:inline">إدارة</span>
             </Link>
             
             {/* User info and logout */}

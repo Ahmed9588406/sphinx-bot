@@ -24,3 +24,24 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Ensure text entered into form controls is black for readability */
+input,
+textarea,
+select {
+  color: #000000 !important;
+}
+
+/* Keep placeholders muted */
+input::placeholder,
+textarea::placeholder {
+  color: #9CA3AF; /* slate-400 */
+  opacity: 1;
+}
+
+/* Make sure disabled inputs remain readable */
+input:disabled,
+textarea:disabled,
+select:disabled {
+  color: #6B7280; /* gray-500 */
+}

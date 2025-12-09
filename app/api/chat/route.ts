@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from 'next/server';
 import { createSupabaseClient, handleChat, simpleChat } from '../../../lib/agent';
 import { createClient } from '@supabase/supabase-js';
@@ -25,14 +26,14 @@ async function getUserFromToken(req: Request) {
 
 // Save message to database
 async function saveMessage(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   conversationId: string,
   sender: 'user' | 'assistant',
   content: string,
   senderId?: string
 ) {
   try {
-    await supabase.from('messages').insert({
+    await (supabase as any).from('messages').insert({
       conversation_id: conversationId,
       sender,
       sender_id: senderId || null,
@@ -41,7 +42,7 @@ async function saveMessage(
     });
     
     // Update conversation's last_message_at
-    await supabase.from('conversations').update({
+    await (supabase as any).from('conversations').update({
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }).eq('id', conversationId);
@@ -50,13 +51,14 @@ async function saveMessage(
   }
 }
 
+
 // Get or create conversation for user
-async function getOrCreateConversation(supabase: ReturnType<typeof createClient>, userId: string) {
+async function getOrCreateConversation(supabase: any, odUserId: string) {
   // Try to get existing open conversation
-  const { data: existing } = await supabase
+  const { data: existing } = await (supabase as any)
     .from('conversations')
     .select('id')
-    .eq('user_id', userId)
+    .eq('user_id', odUserId)
     .eq('status', 'open')
     .order('created_at', { ascending: false })
     .limit(1)
@@ -65,10 +67,10 @@ async function getOrCreateConversation(supabase: ReturnType<typeof createClient>
   if (existing) return existing.id;
   
   // Create new conversation
-  const { data: newConv, error } = await supabase
+  const { data: newConv, error } = await (supabase as any)
     .from('conversations')
     .insert({
-      user_id: userId,
+      user_id: odUserId,
       title: 'محادثة دعم',
       status: 'open',
       metadata: {}
@@ -87,7 +89,7 @@ async function getOrCreateConversation(supabase: ReturnType<typeof createClient>
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { message, customerContext, conversationHistory, userId, userName } = body;
+    const { message, customerContext, conversationHistory, userName, page, offset } = body;
     
     if (!message || typeof message !== 'string') {
       return NextResponse.json({ error: 'Missing or invalid message' }, { status: 400 });
@@ -120,11 +122,16 @@ export async function POST(req: Request) {
     // Use handleChat with RAG if Supabase is configured, otherwise simpleChat
     let reply: string;
     let docs: unknown[] = [];
+    let result: any = null;
     
     if (supabase) {
-      const result = await handleChat(supabase, message, { 
+      result = await handleChat(supabase, message, { 
         customerContext: userName ? `اسم العميل: ${userName}` : customerContext, 
-        conversationHistory 
+        conversationHistory,
+        userId: user?.id,
+        userName: user?.email || (user?.user_metadata?.full_name ?? undefined),
+        page: page ?? undefined,
+        offset: offset ?? undefined
       });
       reply = result.reply;
       docs = result.docs;
@@ -138,12 +145,23 @@ export async function POST(req: Request) {
       await saveMessage(supabase, conversationId, 'assistant', reply);
     }
     
-    return NextResponse.json({ 
-      reply, 
-      docs, 
+    // Build response payload
+    const responsePayload: any = {
+      reply,
+      docs,
       mode: supabase ? 'rag' : 'simple',
-      conversationId 
-    });
+      conversationId
+    };
+
+    // Include additional fields returned by handleChat if available
+    if (result) {
+      if (result.paging) responsePayload.paging = result.paging;
+      if (result.order) responsePayload.order = result.order;
+      if (result.draftOrder) responsePayload.draftOrder = result.draftOrder;
+      if (result.receipt) responsePayload.receipt = result.receipt;
+    }
+
+    return NextResponse.json(responsePayload);
     
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
