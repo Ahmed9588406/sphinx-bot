@@ -45,3 +45,36 @@ textarea:disabled,
 select:disabled {
   color: #6B7280; /* gray-500 */
 }
+
+/* Hide scrollbar for horizontal tabs */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Modal animation */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes zoom-in {
+  from {
+    transform: scale(0.95);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.animate-in {
+  animation: fade-in 0.2s ease-out, zoom-in 0.2s ease-out;
+}

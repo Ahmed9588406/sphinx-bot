@@ -1,0 +1,300 @@
+{
+  "name": "Telegram Bot Registration & Product Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ]
+      },
+      "id": "telegram_trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "telegram_bot_webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.message.text }}",
+              "operation": "startsWith",
+              "value2": "/start"
+            }
+          ]
+        }
+      },
+      "id": "check_start_command",
+      "name": "Is /start Command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "telegram_users",
+        "records": [
+          {
+            "chat_id": "={{ $json.message.chat.id }}",
+            "username": "={{ $json.message.from.username }}",
+            "first_name": "={{ $json.message.from.first_name }}",
+            "last_name": "={{ $json.message.from.last_name }}",
+            "registered_at": "={{ $now.toISO() }}"
+          }
+        ],
+        "options": {
+          "upsert": true,
+          "onConflict": "chat_id"
+        }
+      },
+      "id": "save_to_supabase",
+      "name": "Save User to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [650, 250],
+      "credentials": {
+        "supabaseApi": {
+          "id": "2",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.message.chat.id }}",
+        "text": "=✅ Welcome! You've been registered successfully.\n\nYou'll now receive notifications when new products are added.\n\n🆔 Your Chat ID: {{ $json.message.chat.id }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send_welcome",
+      "name": "Send Welcome Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [850, 250],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.message.chat.id }}",
+        "text": "=ℹ️ Command not recognized.\n\nSend /start to register for notifications.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send_help",
+      "name": "Send Help Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [850, 350],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "webhook-test/n8n_hook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "product_webhook",
+      "name": "Product Insert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 600],
+      "webhookId": "n8n_hook"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "table": "telegram_users",
+        "returnAll": true
+      },
+      "id": "get_all_users",
+      "name": "Get All Registered Users",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [450, 600],
+      "credentials": {
+        "supabaseApi": {
+          "id": "2",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop_users",
+      "name": "Loop Over Users",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [650, 600]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chat_id }}",
+        "text": "=🆕 *New Product Added!*\n\n📦 *Product:* {{ $node[\"Product Insert Webhook\"].json.record.name }}\n💰 *Price:* ${{ $node[\"Product Insert Webhook\"].json.record.price }}\n📝 *Description:* {{ $node[\"Product Insert Webhook\"].json.record.description }}\n🆔 *Product ID:* {{ $node[\"Product Insert Webhook\"].json.record.id }}\n\n⏰ *Added at:* {{ $node[\"Product Insert Webhook\"].json.record.created_at }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send_notification",
+      "name": "Send Notification to User",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [850, 600],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"message\": \"Notifications sent to all users\" } }}"
+      },
+      "id": "respond_webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 600]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is /start Command?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is /start Command?": {
+      "main": [
+        [
+          {
+            "node": "Save User to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Help Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save User to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Send Welcome Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Product Insert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get All Registered Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Registered Users": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Users": {
+      "main": [
+        [
+          {
+            "node": "Send Notification to User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Notification to User": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Users": {
+      "main": [
+        null,
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2",
+  "id": "2",
+  "meta": {
+    "instanceId": "your-instance-id"
+  },
+  "tags": []
+}

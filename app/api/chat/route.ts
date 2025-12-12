@@ -131,7 +131,8 @@ export async function POST(req: Request) {
         userId: user?.id,
         userName: user?.email || (user?.user_metadata?.full_name ?? undefined),
         page: page ?? undefined,
-        offset: offset ?? undefined
+        offset: offset ?? undefined,
+        conversationId: conversationId ?? undefined,
       });
       reply = result.reply;
       docs = result.docs;
@@ -159,6 +160,7 @@ export async function POST(req: Request) {
       if (result.order) responsePayload.order = result.order;
       if (result.draftOrder) responsePayload.draftOrder = result.draftOrder;
       if (result.receipt) responsePayload.receipt = result.receipt;
+      if (result.confirmedOrder) responsePayload.confirmedOrder = result.confirmedOrder;
     }
 
     return NextResponse.json(responsePayload);
@@ -192,3 +194,4 @@ export async function GET() {
     }
   });
 }
+

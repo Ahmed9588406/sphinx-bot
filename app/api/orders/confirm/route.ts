@@ -46,7 +46,7 @@ export async function POST(req: Request) {
     if (confirm) {
       const { data: updated, error: updateErr } = await supabase
         .from('orders')
-        .update({ status: 'pending', updated_at: new Date().toISOString() })
+        .update({ status: 'confirmed', updated_at: new Date().toISOString() })
         .eq('id', orderId)
         .select()
         .single();
@@ -56,7 +56,13 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Failed to confirm order' }, { status: 500 });
       }
 
-      return NextResponse.json({ order: updated });
+      // Fetch order items with product details
+      const { data: items } = await supabase
+        .from('order_items')
+        .select('*, products(id, title, description, price, currency)')
+        .eq('order_id', orderId);
+
+      return NextResponse.json({ order: updated, items: items || [] });
     } else {
       // cancel the draft
       const { data: deleted, error: delErr } = await supabase
