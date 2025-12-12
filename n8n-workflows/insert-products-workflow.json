@@ -1,0 +1,91 @@
+{
+  "name": "Insert Products Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "insert-products",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-insert",
+      "name": "Webhook for Insert",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "products",
+        "columns": "shopify_id,title,handle,description,price,currency,tags,metadata",
+        "dataToSend": "defineBelow",
+        "valuesToSend": {
+          "shopify_id": "={{ $json.body.shopify_id }}",
+          "title": "={{ $json.body.title }}",
+          "handle": "={{ $json.body.handle }}",
+          "description": "={{ $json.body.description }}",
+          "price": "={{ $json.body.price }}",
+          "currency": "={{ $json.body.currency || 'EGP' }}",
+          "tags": "={{ $json.body.tags || [] }}",
+          "metadata": "={{ $json.body.metadata || {} }}"
+        }
+      },
+      "id": "supabase-insert",
+      "name": "Insert Product",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "your-supabase-credential-id",
+          "name": "Supabase API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, inserted: $node[\"Insert Product\"].json, timestamp: new Date().toISOString() } }}"
+      },
+      "id": "respond-insert",
+      "name": "Respond to Insert",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook for Insert": {
+      "main": [
+        [
+          {
+            "node": "Insert Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Product": {
+      "main": [
+        [
+          {
+            "node": "Respond to Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "instanceId": "insert-products"
+  },
+  "tags": []
+}

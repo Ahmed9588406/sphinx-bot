@@ -1,0 +1,81 @@
+{
+  "name": "Listen to Database Changes Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "webhook-test/webhook-test/a29a1465-e236-4d14-b2ab-92897bbf6c5f",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger-test",
+      "name": "Webhook Trigger for Changes",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "table": "products",
+        "columns": "id,shopify_id,title,description,price,currency,created_at",
+        "limit": 50
+      },
+      "id": "supabase-query",
+      "name": "Get Products",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "your-supabase-credential-id",
+          "name": "Supabase API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, change: $json, products: $node[\"Get Products\"].json, timestamp: new Date().toISOString() } }}"
+      },
+      "id": "respond-test",
+      "name": "Respond to Change Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger for Changes": {
+      "main": [
+        [
+          {
+            "node": "Get Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Products": {
+      "main": [
+        [
+          {
+            "node": "Respond to Change Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "instanceId": "listen-db-changes"
+  },
+  "tags": []
+}

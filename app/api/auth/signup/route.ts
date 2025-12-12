@@ -105,13 +105,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'فشل في إنشاء الحساب' }, { status: 500 });
     }
 
+    // Determine user role: first user is admin
+    const { data: anyUser, error: countError } = await supabaseAdmin
+      .from('users')
+      .select('id', { count: 'exact', head: true });
+
+    const isFirstUser = (countError === null) && (anyUser?.length === 0);
+    const userRole = isFirstUser ? 'admin' : 'customer';
+
+
     // Create user record in users table using admin client
     const userRecord = {
       id: authData.user.id,
       email: email.toLowerCase(),
       name: name.trim(),
       phone: phone || null,
-      role: 'customer',
+      role: userRole, // Use dynamic role
       metadata: { 
         language: detectLanguage(name),
         created_via: 'signup',
@@ -129,20 +138,23 @@ export async function POST(req: Request) {
       // We can sync later if needed
     }
 
+    // Prepare user object for response
+    const userResponseObject = {
+      id: authData.user.id,
+      email: authData.user.email,
+      name: name.trim(),
+      phone: phone || null,
+      role: userRole, // Use dynamic role
+      user_metadata: authData.user.user_metadata,
+      metadata: userRecord.metadata
+    };
+
     // Check if we got a session directly (happens when email confirmation is disabled)
     if (authData.session) {
       return NextResponse.json({ 
         success: true, 
         message: 'تم إنشاء الحساب بنجاح',
-        user: {
-          id: authData.user.id,
-          email: authData.user.email,
-          name: name.trim(),
-          phone: phone || null,
-          role: 'customer',
-          user_metadata: authData.user.user_metadata,
-          metadata: userRecord.metadata
-        },
+        user: userResponseObject,
         session: {
           access_token: authData.session.access_token,
           refresh_token: authData.session.refresh_token,
@@ -170,15 +182,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ 
       success: true, 
       message: 'تم إنشاء الحساب بنجاح',
-      user: {
-        id: authData.user.id,
-        email: authData.user.email,
-        name: name.trim(),
-        phone: phone || null,
-        role: 'customer',
-        user_metadata: authData.user.user_metadata,
-        metadata: userRecord.metadata
-      },
+      user: userResponseObject,
       session: {
         access_token: signInData.session.access_token,
         refresh_token: signInData.session.refresh_token,

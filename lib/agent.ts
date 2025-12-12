@@ -261,27 +261,153 @@ export async function callChatAnywhere(messages: ChatMessage[], model?: string):
  * - High-level RAG handler for customer support.
  * - Works with or without Supabase (graceful degradation).
  * - Detects product listing queries and fetches all products.
+ * - Handles order confirmation and cancellation flows.
+ * - Integrates product matching for order creation.
  */
 export async function handleChat(
   supabase: SupabaseClient | null, 
   userMessage: string, 
-  options?: { customerContext?: string; conversationHistory?: ChatMessage[]; userId?: string; userName?: string; page?: number; offset?: number }
+  options?: { customerContext?: string; conversationHistory?: ChatMessage[]; userId?: string; userName?: string; page?: number; offset?: number, conversationId?: string; }
 ): Promise<any> {
   
-  // Detect if user is asking to list all products
-  const productListingKeywords = [
-    'المنتجات', 'منتجات', 'products', 'عندك', 'عندكم', 'متاح', 'متوفر',
-    'ايه عندك', 'إيه عندك', 'شو عندك', 'بتبيعوا', 'بتبيع', 'الكاتالوج',
-    'كل المنتجات', 'list', 'show me', 'what do you have', 'available'
+  // Detect if user is asking to list ALL products (not a specific product)
+  // These are phrases that specifically ask for a list of all products
+  const productListingPhrases = [
+    'كل المنتجات', 'جميع المنتجات', 'المنتجات كلها', 'ايه المنتجات', 'إيه المنتجات',
+    'ايه عندك', 'إيه عندك', 'شو عندك', 'ايه عندكم', 'إيه عندكم',
+    'بتبيعوا ايه', 'بتبيعوا إيه', 'بتبيع ايه', 'بتبيع إيه',
+    'الكاتالوج', 'قائمة المنتجات', 'اعرض المنتجات', 'عرض المنتجات',
+    'list all', 'show all', 'all products', 'what do you have', 'what do you sell'
   ];
   
-  const isProductListingQuery = productListingKeywords.some(kw => 
-    userMessage.toLowerCase().includes(kw.toLowerCase())
+  // Check if the message is asking for ALL products (not a specific one)
+  const normalizedMsg = userMessage.toLowerCase().trim();
+  const isProductListingQuery = productListingPhrases.some(phrase => 
+    normalizedMsg.includes(phrase.toLowerCase())
+  ) || (
+    // Also match short generic queries like "المنتجات" alone
+    ['المنتجات', 'منتجات', 'products'].includes(normalizedMsg)
   );
+
+  // Get the last assistant message to check for draft order context
+  const lastMessage = options?.conversationHistory?.[options.conversationHistory.length - 1];
+  const hasDraftOrderContext = lastMessage?.role === 'assistant' && 
+    (lastMessage.content.includes('تأكيد الطلب') || lastMessage.content.includes('هل تأكد الطلب'));
+
+  // >>> Cancellation Detection (Task 4.1)
+  // Arabic and English cancellation phrases
+  const cancelKeywords = [
+    'لا', 'إلغاء', 'الغاء', 'cancel', 'no', 'مش عايز', 'مش عاوز', 
+    'لأ', 'الغي', 'ألغي', 'كنسل', 'لا شكرا', 'لا شكراً', 'مش محتاج',
+    'لا اريد', 'لا أريد', 'ارجع', 'تراجع', 'stop', 'nevermind', 'never mind'
+  ];
+  
+  const normalizedMessage = userMessage.toLowerCase().trim();
+  const isCancellation = cancelKeywords.some(kw => 
+    normalizedMessage === kw.toLowerCase() || 
+    normalizedMessage.startsWith(kw.toLowerCase() + ' ') ||
+    normalizedMessage.endsWith(' ' + kw.toLowerCase())
+  );
+
+  // Handle cancellation when there's a pending draft order
+  if (isCancellation && hasDraftOrderContext && supabase && options?.userId) {
+    try {
+      const cancelResult = await cancelOrder(supabase, options.userId);
+      if (cancelResult.success) {
+        return {
+          reply: '❌ تم إلغاء الطلب.\nلو عايز تطلب حاجة تانية، قولي وأنا هساعدك! 😊',
+          mode: 'simple',
+          cancelledOrder: cancelResult.order
+        };
+      } else {
+        return {
+          reply: cancelResult.message,
+          mode: 'simple'
+        };
+      }
+    } catch (error: any) {
+      // Task 7.2: Database error handling with Arabic messages and logging
+      const errorMessage = error?.message || 'Unknown error';
+      console.error('Cancellation error:', errorMessage);
+      
+      return {
+        reply: '⚠️ حصل مشكلة أثناء إلغاء الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
+        mode: 'simple',
+        error: {
+          type: 'cancellation_error',
+          message: errorMessage
+        }
+      };
+    }
+  }
+  // <<< End Cancellation Detection
+
+  // >>> Order Confirmation Detection (Task 4.4)
+  const confirmKeywords = ['yes', 'confirm', 'ok', 'نعم', 'أكيد', 'تمام', 'اكد', 'تأكيد', 'موافق', 'حسناً', 'حسنا', 'اه', 'أه', 'ايوه', 'أيوه', 'اوك', 'أوك', 'ماشي'];
+  const isConfirmation = confirmKeywords.some(kw => normalizedMessage === kw.toLowerCase().trim());
+
+  // Task 7.3: Handle confirmation attempt when no draft order context exists
+  if (isConfirmation && !hasDraftOrderContext && supabase && options?.userId) {
+    // User sent confirmation but there's no pending draft order in conversation
+    return {
+      reply: '⚠️ لم أجد طلبًا معلقًا لتأكيده.\n\nلو عايز تطلب حاجة، قولي اسم المنتج والكمية وأنا هساعدك! 😊',
+      mode: 'simple',
+      error: { type: 'no_draft_order' }
+    };
+  }
+
+  if (isConfirmation && hasDraftOrderContext && supabase && options?.userId) {
+    try {
+      // Use the confirmOrder function (Task 4.4)
+      const confirmResult = await confirmOrder(supabase, options.userId);
+      
+      if (confirmResult.success) {
+        // Fetch order items with product details for receipt
+        const { data: orderItemsWithProducts } = await supabase
+          .from('order_items')
+          .select('*, products(id, title, description, price, currency)')
+          .eq('order_id', confirmResult.order.id);
+        
+        return {
+          reply: `✅ تم تأكيد طلبك بنجاح! 🎉\nرقم الطلب: ${confirmResult.order.metadata?.order_number || confirmResult.order.id}\nشكراً لاختيارك Sphinx Fit!`,
+          confirmedOrder: {
+            ...confirmResult.order,
+            order_items: orderItemsWithProducts || confirmResult.orderItems
+          },
+          mode: 'simple'
+        };
+      }
+    } catch (error: any) {
+      // Task 7.2: Database error handling with Arabic messages and logging
+      const errorMessage = error?.message || 'Unknown error';
+      console.error('Confirmation error:', errorMessage);
+      
+      // Task 7.3: Handle no draft order scenario
+      if (errorMessage.includes('No draft order')) {
+        return { 
+          reply: '⚠️ لم أجد طلبًا معلقًا لتأكيده.\n\nلو عايز تطلب حاجة، قولي اسم المنتج والكمية وأنا هساعدك! 😊',
+          mode: 'simple',
+          error: { type: 'no_draft_order' }
+        };
+      }
+      
+      // Task 7.4: Order confirmation failure handling
+      return { 
+        reply: '⚠️ حصل مشكلة أثناء تأكيد الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
+        mode: 'simple',
+        error: {
+          type: 'confirmation_error',
+          message: errorMessage
+        }
+      };
+    }
+  }
+  // <<< End Order Confirmation Logic
+
 
   // 1. Get context based on query type
   let docs: any[] = [];
-  const products: any[] = [];
+  let products: any[] = [];
   
   try {
     // For product listing queries, support paging so replies are not enormous.
@@ -303,7 +429,7 @@ export async function handleChat(
       if (pageErr) throw pageErr;
 
       // Also fetch small set of vector docs for additional context
-      try { docs = await querySimilar(supabase, userMessage, 5); } catch (e) { docs = []; }
+      try { docs = await querySimilar(supabase, userMessage, 5); } catch { docs = []; }
 
       // Build a plain-text listing for this page with full descriptions
       const lines: string[] = [];
@@ -328,10 +454,68 @@ export async function handleChat(
       return { reply: replyText, docs: pageData || [], paging: { offset, pageSize, total, nextOffset } } as any;
     }
 
-    // Non-listing queries: also try vector search for additional context
-    docs = await querySimilar(supabase, userMessage, 5);
+    // >>> SPECIFIC PRODUCT QUERY: Search for specific products mentioned in the message
+    if (supabase) {
+      // Common words to skip (not product names)
+      const commonWords = [
+        'عايز', 'محتاج', 'ممكن', 'فين', 'كام', 'سعر', 'ايه', 'إيه', 'هل', 'في', 
+        'عندكم', 'عندك', 'بكام', 'كم', 'متوفر', 'موجود', 'اشتري', 'اطلب', 'طلب',
+        'the', 'a', 'is', 'what', 'how', 'much', 'price', 'do', 'you', 'have', 'want', 'need'
+      ];
+      
+      // Extract potential product keywords (words 3+ chars that aren't common)
+      const messageWords = userMessage
+        .split(/\s+/)
+        .filter(w => w.length >= 3 && !commonWords.includes(w.toLowerCase()))
+        .sort((a, b) => b.length - a.length); // Prioritize longer words
+      
+      console.log('Product search keywords:', messageWords);
+      
+      // Try to find products matching keywords
+      if (messageWords.length > 0) {
+        // First try: search with the longest/most specific word
+        for (const word of messageWords) {
+          const { data: matchedProducts, error: searchErr } = await supabase
+            .from('products')
+            .select('id, title, description, price, currency, tags')
+            .ilike('title', `%${word}%`)
+            .limit(3);
+          
+          if (!searchErr && matchedProducts && matchedProducts.length > 0) {
+            console.log(`Found ${matchedProducts.length} products matching "${word}":`, matchedProducts.map(p => p.title));
+            
+            // If we found exactly 1 product, that's likely the one they want
+            // If multiple, include all but prioritize exact matches
+            if (matchedProducts.length === 1) {
+              products = matchedProducts;
+              break;
+            } else {
+              // Score products by how well they match
+              const scored = matchedProducts.map(p => {
+                const titleLower = p.title.toLowerCase();
+                const wordLower = word.toLowerCase();
+                let score = 0;
+                if (titleLower === wordLower) score = 100;
+                else if (titleLower.includes(wordLower)) score = 80;
+                else if (wordLower.includes(titleLower)) score = 60;
+                else score = 40;
+                return { ...p, score };
+              });
+              scored.sort((a, b) => b.score - a.score);
+              products = scored.slice(0, 3);
+              break;
+            }
+          }
+        }
+      }
+      
+      // If no specific products found, try vector search
+      if (products.length === 0) {
+        docs = await querySimilar(supabase, userMessage, 5);
+      }
+    }
   } catch (err) {
-    console.warn('Could not query docs/products, continuing without RAG');
+    console.warn('Could not query docs/products, continuing without RAG:', err);
   }
 
   // 2. Build system prompt (Egyptian Arabic tone for Sphinx Fit - ONLY use provided data)
@@ -357,25 +541,33 @@ export async function handleChat(
   // 3. Format context
   let contextText = '';
   
-  // Add products list if available
+  // Add products list if available (from specific product search)
   if (products.length > 0) {
-    contextText += '\n\n📦 المنتجات المتاحة حالياً:\n';
+    contextText += '\n\n📦 المنتجات المطابقة للبحث:\n';
     products.forEach((p, i) => {
       contextText += `${i + 1}. ${p.title}`;
-      if (p.price) contextText += ` - ${p.price} ${p.currency || 'EGP'}`;
-      if (p.description) contextText += `\n   ${p.description}`;
+      if (p.price) contextText += ` - السعر: ${p.price} ${p.currency || 'EGP'}`;
+      if (p.description) contextText += `\n   الوصف: ${p.description}`;
+      if (p.tags && p.tags.length > 0) contextText += `\n   التصنيف: ${p.tags.join(', ')}`;
       contextText += '\n';
     });
+    contextText += '\n⚠️ رد فقط بالمنتجات المذكورة أعلاه. لا تذكر منتجات أخرى.';
   }
   
-  // Add vector search results if available (and different from products)
-  if (docs.length > 0) {
-    const productDocs = docs.filter(d => d.metadata?.product_id || d.source === 'product');
-    const otherDocs = docs.filter(d => !d.metadata?.product_id && d.source !== 'product');
+  // Add vector search results if available (and no specific products found)
+  if (docs.length > 0 && products.length === 0) {
+    // Extract product info from vector search results
+    const productDocs = docs.filter(d => d.metadata?.product_id || d.content?.includes('EGP') || d.content?.includes('جنيه'));
+    const otherDocs = docs.filter(d => !d.metadata?.product_id && !d.content?.includes('EGP') && !d.content?.includes('جنيه'));
+    
+    if (productDocs.length > 0) {
+      contextText += '\n\n📦 معلومات المنتجات:\n' + 
+        productDocs.map(d => `- ${d.content}`).join('\n');
+    }
     
     if (otherDocs.length > 0) {
       contextText += '\n\nمعلومات إضافية:\n' + 
-        otherDocs.map((d, i) => `- ${d.content}`).join('\n');
+        otherDocs.map(d => `- ${d.content}`).join('\n');
     }
   }
 
@@ -404,112 +596,599 @@ export async function handleChat(
   // 6. Try to detect an order intent and extract order details using the LLM
   try {
     const orderDetails = await extractOrderDetails(userMessage);
-    // If we found items and have a supabase client and userId, create a DRAFT order and ask for confirmation
-    if (orderDetails && Array.isArray(orderDetails.items) && orderDetails.items.length > 0 && supabase && options?.userId) {
-      // Build order items with product ids/prices when possible
-      const itemsWithPrices = await Promise.all(orderDetails.items.map(async (it: any) => {
-        // try to find product by title in fetched products
-        const found = (products || []).find(p => p.title && String(p.title).toLowerCase().includes(String(it.product_title || it.title || '').toLowerCase()));
+    
+    // If we found items and have a supabase client, check authentication and create a DRAFT order
+    if (orderDetails && orderDetails.isOrderIntent && Array.isArray(orderDetails.items) && orderDetails.items.length > 0 && supabase) {
+      
+      // Task 7.1: Authentication check for order operations
+      // Return Arabic prompt to log in if not authenticated
+      if (!options?.userId) {
         return {
-          product_title: it.product_title || it.title,
-          product_id: found?.id || null,
-          quantity: Number(it.quantity || 1),
-          unit_price: found?.price || Number(it.unit_price || 0)
+          reply: '⚠️ عشان تقدر تعمل طلب، لازم تسجل دخول الأول.\n\nاضغط على "تسجيل الدخول" في أعلى الصفحة وبعدين ارجع كلمني تاني! 😊',
+          mode: 'simple',
+          requiresAuth: true
         };
-      }));
+      }
+      
+      // Task 4.2: Use matchProductsFromCatalog for product matching
+      const matchedProducts = await matchProductsFromCatalog(supabase, orderDetails.items);
+      
+      // Log matched products for debugging
+      console.log('Matched products:', JSON.stringify(matchedProducts, null, 2));
+      console.log('Order details items:', JSON.stringify(orderDetails.items, null, 2));
+      
+      // Check for unmatched products and handle gracefully
+      const unmatchedProducts = matchedProducts.filter(p => !p.matched);
+      const hasUnmatchedProducts = unmatchedProducts.length > 0;
+      
+      // Build draft order items from matched products
+      // Ensure quantity is taken from the correct extracted item
+      const draftItems: DraftOrderItem[] = matchedProducts.map((mp, idx) => {
+        const extractedItem = orderDetails.items[idx];
+        const quantity = extractedItem?.quantity || 1;
+        const price = mp.price || 0;
+        
+        console.log(`Item ${idx}: ${mp.title}, qty: ${quantity}, price: ${price}, total: ${price * quantity}`);
+        
+        return {
+          product_id: mp.product_id,
+          product_title: mp.matched ? mp.title : mp.original_query,
+          quantity: quantity,
+          price: price
+        };
+      });
+      
+      // Calculate total for verification
+      const calculatedTotal = draftItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+      console.log('Calculated total:', calculatedTotal);
 
-      const total = itemsWithPrices.reduce((s: number, it: any) => s + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
+      // Task 4.3: Use createDraftOrder function for draft order creation
+      try {
+        const draftResult = await createDraftOrder(
+          supabase,
+          options.userId,
+          draftItems,
+          orderDetails.shipping,
+          options.userName
+        );
 
-      // generate human-friendly order number
-      const orderNumber = `SFX-${Date.now().toString(36)}-${Math.floor(Math.random() * 9000) + 1000}`;
-
-      const draftRecord: any = {
-        user_id: options.userId,
-        status: 'draft',
-        total: total,
-        currency: 'EGP',
-        shipping_address: orderDetails.shipping || null,
-        metadata: {
-          created_via: 'chat-assistant',
-          customer_name: options.userName || null,
-          order_number: orderNumber
-        }
-      };
-
-      const { data: draftOrder, error: draftError } = await supabase.from('orders').insert(draftRecord).select().single();
-      if (!draftError && draftOrder) {
-        // Insert order_items rows for the draft
-        const orderItems = itemsWithPrices.map((it: any) => ({
-          order_id: draftOrder.id,
-          product_id: it.product_id,
-          quantity: it.quantity,
-          price: it.unit_price || 0,
-          metadata: {}
-        }));
-        try {
-          await supabase.from('order_items').insert(orderItems);
-        } catch (e) {
-          // ignore if table doesn't exist
-        }
-
-        // Prepare a draft receipt text
-        const receiptLines = [] as string[];
-        receiptLines.push(`Draft Order ID: ${draftOrder.id}`);
-        receiptLines.push('Items:');
-        itemsWithPrices.forEach((it: any, idx: number) => {
-          receiptLines.push(`${idx + 1}. ${it.product_title} x${it.quantity} — ${it.unit_price || 0} EGP`);
+        // Build order summary with matched product details
+        const receiptLines: string[] = [];
+        receiptLines.push('📦 **ملخص الطلب:**');
+        
+        draftItems.forEach((item, idx) => {
+          const matchedProduct = matchedProducts[idx];
+          const lineTotal = item.price * item.quantity;
+          const matchStatus = matchedProduct.matched ? '' : ' ⚠️ (غير متوفر)';
+          receiptLines.push(`${idx + 1}. ${item.product_title} × ${item.quantity} = ${lineTotal.toFixed(0)} EGP${matchStatus}`);
         });
-        receiptLines.push(`Total: ${total} EGP`);
+        
+        receiptLines.push('');
+        receiptLines.push(`**المجموع:** ${draftResult.total.toFixed(0)} EGP`);
+        
+        // Add warning for unmatched products
+        if (hasUnmatchedProducts) {
+          receiptLines.push('');
+          receiptLines.push('⚠️ **ملاحظة:** بعض المنتجات غير متوفرة حالياً وسيتم مراجعتها.');
+        }
+        
+        // Add shipping details if provided
         if (orderDetails.shipping) {
-          receiptLines.push('Shipping:');
-          if (orderDetails.shipping.name) receiptLines.push(`Name: ${orderDetails.shipping.name}`);
-          if (orderDetails.shipping.phone) receiptLines.push(`Phone: ${orderDetails.shipping.phone}`);
-          if (orderDetails.shipping.address) receiptLines.push(`Address: ${orderDetails.shipping.address}`);
+          receiptLines.push('');
+          receiptLines.push('📍 **تفاصيل الشحن:**');
+          if (orderDetails.shipping.name) receiptLines.push(`الاسم: ${orderDetails.shipping.name}`);
+          if (orderDetails.shipping.phone) receiptLines.push(`الهاتف: ${orderDetails.shipping.phone}`);
+          if (orderDetails.shipping.address) receiptLines.push(`العنوان: ${orderDetails.shipping.address}`);
         }
 
         const receiptText = receiptLines.join('\n');
 
-        // Ask the user to confirm the draft order
-        const confirmPrompt = `انا جهزت طلب مؤقت برقم ${draftOrder.id} بمجموع ${total} EGP. عايز تأكد الطلب؟ (اكتب "نعم" للتأكيد أو "لا" للإلغاء)`;
-        const finalReply = reply + '\n\n' + confirmPrompt;
+        // Include confirmation prompt in response
+        const confirmPrompt = `\n\n**هل تأكد الطلب؟** (اكتب "نعم" للتأكيد أو "لا" للإلغاء)`;
+        const finalReply = reply + '\n\n' + receiptText + confirmPrompt;
 
-        return { reply: finalReply, docs: products.length > 0 ? products : docs, draftOrder, receipt: receiptText } as any;
+        // Return response with draftOrder in payload
+        return { 
+          reply: finalReply, 
+          docs: products.length > 0 ? products : docs,
+          mode: 'rag',
+          draftOrder: {
+            ...draftResult.order,
+            order_items: draftResult.orderItems.map((item, idx) => ({
+              ...item,
+              products: {
+                id: matchedProducts[idx]?.product_id,
+                title: draftItems[idx]?.product_title || 'منتج',
+                description: null,
+                price: matchedProducts[idx]?.price || 0,
+                currency: matchedProducts[idx]?.currency || 'EGP'
+              }
+            }))
+          }
+        } as any;
+      } catch (draftError: any) {
+        // Task 7.2: Database error handling with Arabic messages
+        console.error('Failed to create draft order:', draftError.message);
+        
+        // Return user-friendly Arabic error message
+        return {
+          reply: '⚠️ حصل مشكلة أثناء إنشاء الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
+          mode: 'simple',
+          error: {
+            type: 'database_error',
+            message: draftError.message
+          }
+        };
       }
     }
   } catch (e) {
-    console.warn('Order extraction/creation failed:', e instanceof Error ? e.message : String(e));
+    // Task 7.2: Log errors for debugging
+    const errorMessage = e instanceof Error ? e.message : String(e);
+    console.error('Order extraction/creation failed:', errorMessage);
+    
+    // Continue with normal reply if extraction fails (non-critical)
   }
 
-  return { reply, docs: products.length > 0 ? products : docs };
+  return { reply, docs: products.length > 0 ? products : docs, mode: 'rag' };
+}
+
+// ============================================
+// Order Management Utility Functions
+// ============================================
+
+/**
+ * generateOrderNumber
+ * - Generates a unique order number in format: SFX-{base36_timestamp}-{4_digit_random}
+ * - Ensures uniqueness through timestamp + random combination
+ * - Requirements: 2.2
+ */
+export function generateOrderNumber(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.floor(Math.random() * 9000) + 1000; // 4-digit random (1000-9999)
+  return `SFX-${timestamp}-${random}`;
+}
+
+/**
+ * OrderItem type for total calculation
+ */
+export interface OrderItemForTotal {
+  price: number;
+  quantity: number;
+}
+
+/**
+ * calculateOrderTotal
+ * - Calculates the total price for an order from its items
+ * - Sum of (price × quantity) for all items
+ * - Handles edge cases: empty items array returns 0, zero prices are valid
+ * - Requirements: 2.4
+ */
+export function calculateOrderTotal(items: OrderItemForTotal[]): number {
+  if (!items || items.length === 0) {
+    return 0;
+  }
+  
+  return items.reduce((total, item) => {
+    const price = Number(item.price) || 0;
+    const quantity = Number(item.quantity) || 0;
+    return total + (price * quantity);
+  }, 0);
+}
+
+/**
+ * Types for draft order creation
+ */
+export interface ShippingAddress {
+  name?: string;
+  phone?: string;
+  address?: string;
+}
+
+export interface DraftOrderItem {
+  product_id: string | null;
+  product_title: string;
+  quantity: number;
+  price: number;
+}
+
+export interface Order {
+  id: string;
+  user_id: string;
+  status: 'draft' | 'confirmed' | 'cancelled' | 'pending' | 'completed';
+  total: number;
+  currency: string;
+  shipping_address: ShippingAddress | null;
+  metadata: {
+    order_number: string;
+    created_via: 'chat-assistant';
+    customer_name?: string;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrderItem {
+  id: string;
+  order_id: string;
+  product_id: string | null;
+  quantity: number;
+  price: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface DraftOrderResult {
+  order: Order;
+  orderItems: OrderItem[];
+  orderNumber: string;
+  total: number;
+}
+
+/**
+ * createDraftOrder
+ * - Creates a draft order in the database with status 'draft'
+ * - Inserts order record and corresponding order_items records
+ * - Includes all required metadata fields (order_number, created_via, customer_name)
+ * - Returns complete order with items
+ * - Requirements: 2.1, 2.3, 6.1, 6.2, 6.4
+ */
+export async function createDraftOrder(
+  supabase: SupabaseClient,
+  userId: string,
+  items: DraftOrderItem[],
+  shipping?: ShippingAddress,
+  customerName?: string
+): Promise<DraftOrderResult> {
+  // Generate unique order number
+  const orderNumber = generateOrderNumber();
+  
+  // Calculate total from items
+  const total = calculateOrderTotal(items.map(item => ({
+    price: item.price,
+    quantity: item.quantity
+  })));
+  
+  // Create order record
+  const orderRecord = {
+    user_id: userId,
+    status: 'draft' as const,
+    total: total,
+    currency: 'EGP',
+    shipping_address: shipping || null,
+    metadata: {
+      order_number: orderNumber,
+      created_via: 'chat-assistant' as const,
+      customer_name: customerName || undefined
+    }
+  };
+  
+  const { data: order, error: orderError } = await supabase
+    .from('orders')
+    .insert(orderRecord)
+    .select()
+    .single();
+  
+  if (orderError) {
+    throw new Error(`Failed to create draft order: ${orderError.message}`);
+  }
+  
+  // Create order items records
+  const orderItemsRecords = items.map(item => ({
+    order_id: order.id,
+    product_id: item.product_id,
+    quantity: item.quantity,
+    price: item.price,
+    metadata: {}
+  }));
+  
+  const { data: orderItems, error: itemsError } = await supabase
+    .from('order_items')
+    .insert(orderItemsRecords)
+    .select();
+  
+  if (itemsError) {
+    // Rollback: delete the order if items insertion fails
+    await supabase.from('orders').delete().eq('id', order.id);
+    throw new Error(`Failed to create order items: ${itemsError.message}`);
+  }
+  
+  return {
+    order: order as Order,
+    orderItems: orderItems as OrderItem[],
+    orderNumber: orderNumber,
+    total: total
+  };
+}
+
+// Types for order extraction and product matching
+export interface ExtractedOrderItem {
+  product_title: string;
+  quantity: number;
+  unit_price?: number;
+}
+
+export interface ExtractedOrderDetails {
+  items: ExtractedOrderItem[];
+  shipping?: {
+    name?: string;
+    phone?: string;
+    address?: string;
+  };
+  isOrderIntent: boolean;
+}
+
+export interface MatchedProduct {
+  product_id: string | null;
+  title: string;
+  price: number;
+  currency: string;
+  matched: boolean;
+  original_query: string;
+}
+
+/**
+ * matchProductsFromCatalog
+ * - Queries the products table to find matches for extracted product titles.
+ * - Uses ILIKE for case-insensitive partial matching.
+ * - Returns matched products with id, title, price, currency, and matched flag.
+ * - For unmatched products, returns matched: false with price: 0.
+ * - IMPROVED: Better matching logic to avoid returning wrong products
+ */
+export async function matchProductsFromCatalog(
+  supabase: SupabaseClient,
+  extractedItems: Array<{ product_title: string; quantity: number }>
+): Promise<MatchedProduct[]> {
+  const results: MatchedProduct[] = [];
+
+  for (const item of extractedItems) {
+    const searchTitle = item.product_title.trim();
+    
+    if (!searchTitle) {
+      results.push({
+        product_id: null,
+        title: searchTitle,
+        price: 0,
+        currency: 'EGP',
+        matched: false,
+        original_query: item.product_title
+      });
+      continue;
+    }
+
+    try {
+      // Step 1: Try exact match first (case-insensitive)
+      let { data: products, error } = await supabase
+        .from('products')
+        .select('id, title, price, currency, description')
+        .ilike('title', searchTitle)
+        .limit(5);
+
+      // Step 2: If no exact match, try partial match with wildcards
+      if (!error && (!products || products.length === 0)) {
+        const partialResult = await supabase
+          .from('products')
+          .select('id, title, price, currency, description')
+          .ilike('title', `%${searchTitle}%`)
+          .limit(5);
+        
+        products = partialResult.data;
+        error = partialResult.error;
+      }
+
+      // Step 3: If still no match, try matching with significant words (3+ chars)
+      // But be more careful - only match if the word is significant
+      if (!error && (!products || products.length === 0)) {
+        const words = searchTitle.split(/\s+/).filter(w => w.length >= 3);
+        // Sort by length descending to prioritize longer, more specific words
+        words.sort((a, b) => b.length - a.length);
+        
+        for (const word of words) {
+          // Skip common Arabic words that are too generic
+          const genericWords = ['عايز', 'محتاج', 'ممكن', 'واحد', 'اتنين', 'تلاتة', 'كام', 'فين', 'ازاي'];
+          if (genericWords.includes(word)) continue;
+          
+          const wordResult = await supabase
+            .from('products')
+            .select('id, title, price, currency, description')
+            .ilike('title', `%${word}%`)
+            .limit(5);
+          
+          if (!wordResult.error && wordResult.data && wordResult.data.length > 0) {
+            products = wordResult.data;
+            break;
+          }
+        }
+      }
+
+      if (error) {
+        console.error('Product matching error:', error.message);
+        results.push({
+          product_id: null,
+          title: searchTitle,
+          price: 0,
+          currency: 'EGP',
+          matched: false,
+          original_query: item.product_title
+        });
+        continue;
+      }
+
+      if (products && products.length > 0) {
+        // If multiple products found, find the best match
+        let bestMatch = products[0];
+        
+        if (products.length > 1) {
+          // Score each product based on how well it matches the search
+          const searchLower = searchTitle.toLowerCase();
+          let bestScore = 0;
+          
+          for (const product of products) {
+            const titleLower = product.title.toLowerCase();
+            let score = 0;
+            
+            // Exact match gets highest score
+            if (titleLower === searchLower) {
+              score = 100;
+            }
+            // Title contains full search term
+            else if (titleLower.includes(searchLower)) {
+              score = 80;
+            }
+            // Search term contains full title
+            else if (searchLower.includes(titleLower)) {
+              score = 70;
+            }
+            // Partial word matches
+            else {
+              const searchWords = searchLower.split(/\s+/);
+              const titleWords = titleLower.split(/\s+/);
+              const matchingWords = searchWords.filter((sw: string) => 
+                titleWords.some((tw: string) => tw.includes(sw) || sw.includes(tw))
+              );
+              score = (matchingWords.length / searchWords.length) * 60;
+            }
+            
+            if (score > bestScore) {
+              bestScore = score;
+              bestMatch = product;
+            }
+          }
+        }
+        
+        results.push({
+          product_id: bestMatch.id,
+          title: bestMatch.title,
+          price: bestMatch.price || 0,
+          currency: bestMatch.currency || 'EGP',
+          matched: true,
+          original_query: item.product_title
+        });
+      } else {
+        results.push({
+          product_id: null,
+          title: searchTitle,
+          price: 0,
+          currency: 'EGP',
+          matched: false,
+          original_query: item.product_title
+        });
+      }
+    } catch (err: any) {
+      console.error('Product matching exception:', err.message);
+      results.push({
+        product_id: null,
+        title: searchTitle,
+        price: 0,
+        currency: 'EGP',
+        matched: false,
+        original_query: item.product_title
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * parseOrderDetailsResponse
+ * Pure function that parses the LLM response into structured order details.
+ * This function is separated for testability.
+ */
+export function parseOrderDetailsResponse(rawResponse: string): ExtractedOrderDetails {
+  // Try to parse JSON from response
+  try {
+    const j = JSON.parse(rawResponse.trim());
+    // Ensure isOrderIntent is set
+    const result: ExtractedOrderDetails = {
+      items: Array.isArray(j.items) ? j.items.map((item: any) => ({
+        product_title: item.product_title || item.title || '',
+        quantity: Number(item.quantity) || 1,
+        unit_price: item.unit_price
+      })) : [],
+      shipping: j.shipping || undefined,
+      isOrderIntent: Boolean(j.isOrderIntent || (j.items && j.items.length > 0))
+    };
+    return result;
+  } catch {
+    // Try to extract JSON substring
+    const m = rawResponse.match(/\{[\s\S]*\}/);
+    if (m) {
+      try { 
+        const j = JSON.parse(m[0]);
+        const result: ExtractedOrderDetails = {
+          items: Array.isArray(j.items) ? j.items.map((item: any) => ({
+            product_title: item.product_title || item.title || '',
+            quantity: Number(item.quantity) || 1,
+            unit_price: item.unit_price
+          })) : [],
+          shipping: j.shipping || undefined,
+          isOrderIntent: Boolean(j.isOrderIntent || (j.items && j.items.length > 0))
+        };
+        return result;
+      } catch (e) { 
+        console.error('JSON parse error:', e);
+        return { items: [], isOrderIntent: false }; 
+      }
+    }
+    console.warn('Could not extract JSON from:', rawResponse.slice(0, 200));
+    return { items: [], isOrderIntent: false };
+  }
 }
 
 /**
  * extractOrderDetails
  * Asks the LLM to extract structured order information from a free-text user message.
- * Returns: { items: [{ product_title, quantity, unit_price? }], shipping?: { name, address, phone } }
+ * Enhanced to support Arabic product names and shipping details
+ * IMPROVED: More accurate extraction with better prompting
+ * Returns: { items: [{ product_title, quantity, unit_price? }], shipping?: { name, address, phone }, isOrderIntent: boolean }
  */
-export async function extractOrderDetails(userMessage: string) {
-  // Build a small prompt that asks for JSON only
-  const prompt = `Extract order details from the user's message as JSON.
-Return exactly JSON with this shape: { "items": [ { "product_title": string, "quantity": number, "unit_price": number | null } ], "shipping": { "name": string | null, "phone": string | null, "address": string | null } }
+export async function extractOrderDetails(userMessage: string): Promise<ExtractedOrderDetails> {
+  // Build a more robust prompt that handles both English and Arabic
+  const prompt = `أنت مساعد استخراج معلومات الطلبات. استخرج معلومات الطلب من رسالة المستخدم بصيغة JSON.
 
-If you cannot extract any items, return: { "items": [] }
+⚠️ قواعد مهمة جداً:
+1. حدد أولاً: هل المستخدم يريد طلب/شراء منتج فعلاً؟
+   - "عايز تيشيرت" = طلب (isOrderIntent: true)
+   - "عندكم تيشيرت؟" = سؤال عن توفر (isOrderIntent: false)
+   - "كام سعر التيشيرت؟" = سؤال عن سعر (isOrderIntent: false)
+   - "عايز اشتري" أو "محتاج" = طلب (isOrderIntent: true)
 
-User message:\n${userMessage}\n\nJSON:`;
+2. استخرج اسم المنتج بالضبط كما ذكره المستخدم:
+   - "عايز 2 تيشيرت أسود" → product_title: "تيشيرت أسود"
+   - "محتاج شورت رياضي" → product_title: "شورت رياضي"
+   - لا تضيف كلمات من عندك
 
-  const raw = await callChatAnywhere([{ role: 'system', content: 'You are a JSON extraction assistant. Respond ONLY with valid JSON.' }, { role: 'user', content: prompt }], process.env.CHAT_MODEL || undefined);
-  // Try to parse JSON from response
-  try {
-    const j = JSON.parse(raw.trim());
-    return j;
-  } catch (err) {
-    // Try to extract JSON substring
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) {
-      try { return JSON.parse(m[0]); } catch (e) { return { items: [] }; }
+3. الكمية:
+   - "2 تيشيرت" → quantity: 2
+   - "تيشيرت" بدون رقم → quantity: 1
+   - "اتنين" أو "تلاتة" → حولها لأرقام
+
+أرجع JSON بالشكل التالي فقط:
+{
+  "isOrderIntent": true,
+  "items": [
+    { 
+      "product_title": "اسم المنتج بالضبط", 
+      "quantity": 1
     }
-    return { items: [] };
+  ],
+  "shipping": {
+    "name": "اسم المستقبل أو null",
+    "phone": "رقم الهاتف أو null", 
+    "address": "العنوان أو null"
   }
+}
+
+رسالة المستخدم:
+${userMessage}
+
+أرجع JSON فقط بدون أي نص إضافي:`;
+
+  const raw = await callChatAnywhere([
+    { role: 'system', content: 'أنت متخصص استخراج بيانات JSON. أرد فقط بـ JSON صحيح بدون تعليقات.' }, 
+    { role: 'user', content: prompt }
+  ], process.env.CHAT_MODEL || undefined);
+  
+  return parseOrderDetailsResponse(raw);
 }
 
 /**
@@ -525,6 +1204,67 @@ export async function recommendProducts(supabase: SupabaseClient | null, query: 
     snippet: d.content.slice(0, 300)
   }));
 }
+
+/**
+ * getPersonalizedRecommendations
+ * - Generates product recommendations for a user based on their past order history.
+ */
+export async function getPersonalizedRecommendations(supabase: SupabaseClient, userId: string, k = 3) {
+  try {
+    // 1. Fetch IDs of the user's confirmed orders.
+    const { data: orders, error: ordersError } = await supabase
+      .from('orders')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('status', 'confirmed');
+      
+    if (ordersError) throw new Error(`Failed to fetch user's orders: ${ordersError.message}`);
+    if (!orders || orders.length === 0) return [];
+
+    const orderIds = orders.map(o => o.id);
+
+    // 2. Fetch IDs of products from those orders.
+    const { data: purchasedItems, error: itemsError } = await supabase
+      .from('order_items')
+      .select('product_id')
+      .in('order_id', orderIds);
+
+    if (itemsError) throw new Error(`Failed to fetch user's purchased items: ${itemsError.message}`);
+
+    const purchasedProductIds = new Set((purchasedItems || []).map(item => item.product_id).filter(Boolean));
+    if (purchasedProductIds.size === 0) {
+      return []; // No purchase history, no recommendations.
+    }
+
+    // 3. Fetch the details of the purchased products to build a "taste profile".
+    const { data: purchasedProducts, error: productsError } = await supabase
+      .from('products')
+      .select('id, title, description, tags')
+      .in('id', Array.from(purchasedProductIds));
+
+    if (productsError) throw new Error(`Failed to fetch product details: ${productsError.message}`);
+    
+    // 4. Create a "taste profile" string.
+    const tasteProfile = (purchasedProducts || []).map(p => `${p.title} ${p.tags?.join(' ')} ${p.description}`).join('\n');
+    if (!tasteProfile) {
+      return [];
+    }
+
+    // 5. Use the taste profile to find similar products.
+    const similarDocs = await querySimilar(supabase, tasteProfile, k + purchasedProductIds.size);
+
+    // 6. Filter out products the user has already bought and return top K.
+    const recommendations = similarDocs
+      .filter(doc => doc.metadata?.product_id && !purchasedProductIds.has(doc.metadata.product_id))
+      .slice(0, k);
+
+    return recommendations;
+  } catch (error: any) {
+    console.error('Error generating personalized recommendations:', error.message);
+    return [];
+  }
+}
+
 
 /**
  * simpleChat
@@ -547,7 +1287,140 @@ export async function simpleChat(userMessage: string): Promise<string> {
   return callChatAnywhere(messages);
 }
 
-export default {
+// ============================================
+// Order Confirmation/Cancellation Functions
+// ============================================
+
+/**
+ * Result type for confirmOrder function
+ */
+export interface ConfirmOrderResult {
+  order: Order;
+  orderItems: OrderItem[];
+  success: boolean;
+}
+
+/**
+ * confirmOrder
+ * - Finds the most recent draft order for a user
+ * - Updates status to 'confirmed'
+ * - Updates `updated_at` timestamp
+ * - Fetches and returns order with items
+ * - Requirements: 3.1, 6.3
+ */
+export async function confirmOrder(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<ConfirmOrderResult> {
+  // Find the most recent draft order for this user
+  const { data: draftOrder, error: findError } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'draft')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (findError || !draftOrder) {
+    throw new Error('No draft order found for user');
+  }
+
+  // Update order status to 'confirmed' and update timestamp
+  const { data: confirmedOrder, error: updateError } = await supabase
+    .from('orders')
+    .update({ 
+      status: 'confirmed', 
+      updated_at: new Date().toISOString() 
+    })
+    .eq('id', draftOrder.id)
+    .select()
+    .single();
+
+  if (updateError || !confirmedOrder) {
+    throw new Error(`Failed to confirm order: ${updateError?.message || 'Unknown error'}`);
+  }
+
+  // Fetch order items for the confirmed order
+  const { data: orderItems, error: itemsError } = await supabase
+    .from('order_items')
+    .select('*')
+    .eq('order_id', confirmedOrder.id);
+
+  if (itemsError) {
+    console.warn('Could not fetch order items:', itemsError.message);
+  }
+
+  return {
+    order: confirmedOrder as Order,
+    orderItems: (orderItems || []) as OrderItem[],
+    success: true
+  };
+}
+
+/**
+ * Result type for cancelOrder function
+ */
+export interface CancelOrderResult {
+  success: boolean;
+  message: string;
+  order?: Order;
+}
+
+/**
+ * cancelOrder
+ * - Finds the most recent draft order for a user
+ * - Updates status to 'cancelled'
+ * - Returns success/failure with message
+ * - Requirements: 3.2, 6.3
+ */
+export async function cancelOrder(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<CancelOrderResult> {
+  // Find the most recent draft order for this user
+  const { data: draftOrder, error: findError } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'draft')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (findError || !draftOrder) {
+    return {
+      success: false,
+      message: 'لم يتم العثور على طلب معلق للإلغاء'
+    };
+  }
+
+  // Update order status to 'cancelled' and update timestamp
+  const { data: cancelledOrder, error: updateError } = await supabase
+    .from('orders')
+    .update({ 
+      status: 'cancelled', 
+      updated_at: new Date().toISOString() 
+    })
+    .eq('id', draftOrder.id)
+    .select()
+    .single();
+
+  if (updateError || !cancelledOrder) {
+    return {
+      success: false,
+      message: `فشل في إلغاء الطلب: ${updateError?.message || 'خطأ غير معروف'}`
+    };
+  }
+
+  return {
+    success: true,
+    message: 'تم إلغاء الطلب بنجاح',
+    order: cancelledOrder as Order
+  };
+}
+
+const agentModule = {
   createSupabaseClient,
   embedText,
   upsertDocuments,
@@ -556,5 +1429,14 @@ export default {
   callChatAnywhere,
   handleChat,
   recommendProducts,
-  simpleChat
+  simpleChat,
+  matchProductsFromCatalog,
+  extractOrderDetails,
+  generateOrderNumber,
+  calculateOrderTotal,
+  createDraftOrder,
+  confirmOrder,
+  cancelOrder
 };
+
+export default agentModule;
