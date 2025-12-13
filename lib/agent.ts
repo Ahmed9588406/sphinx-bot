@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
+import { translateToEnglish, buildSearchQueries, generateBilingualProductText } from './productDictionary';
 
 // Basic types used across helper functions
 type DocumentRecord = {
@@ -120,6 +121,120 @@ export async function upsertDocuments(supabase: SupabaseClient, docs: DocumentRe
   const { data, error } = await supabase.from('documents').insert(rows).select('*');
   if (error) throw error;
   return data;
+}
+
+/**
+ * upsertProductDocuments
+ * - Creates bilingual (Arabic + English) document embeddings for products
+ * - Uses generateBilingualProductText to include Arabic translations
+ * - This improves semantic search for Arabic queries
+ */
+export async function upsertProductDocuments(
+  supabase: SupabaseClient,
+  products: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    price?: number;
+    currency?: string;
+    tags?: string[];
+    metadata?: { color?: string; gender?: string; material?: string };
+  }>
+) {
+  if (!products || products.length === 0) return [];
+
+  const dim = Number(process.env.EMBEDDING_DIM || 1536);
+  const rows: any[] = [];
+
+  for (const product of products) {
+    // Generate bilingual content for better Arabic matching
+    const bilingualContent = generateBilingualProductText(product);
+    
+    // Also include price info for context
+    const fullContent = product.price 
+      ? `${bilingualContent} السعر: ${product.price} ${product.currency || 'EGP'}`
+      : bilingualContent;
+    
+    console.log(`Generating bilingual embedding for: ${product.title}`);
+    
+    const emb = await embedText(fullContent);
+    if (emb.length !== dim) {
+      console.warn(`embedding dim ${emb.length} does not match EMBEDDING_DIM ${dim}`);
+    }
+    
+    rows.push({
+      content: fullContent,
+      metadata: {
+        product_id: product.id,
+        title: product.title,
+        price: product.price,
+        currency: product.currency || 'EGP',
+        tags: product.tags,
+        ...product.metadata
+      },
+      embedding: emb
+    });
+  }
+
+  // Upsert documents (delete existing product docs first to avoid duplicates)
+  const productIds = products.map(p => p.id);
+  
+  // Delete existing documents for these products
+  await supabase
+    .from('documents')
+    .delete()
+    .filter('metadata->>product_id', 'in', `(${productIds.map(id => `"${id}"`).join(',')})`);
+
+  // Insert new documents
+  const { data, error } = await supabase.from('documents').insert(rows).select('*');
+  if (error) throw error;
+  
+  console.log(`Upserted ${rows.length} bilingual product documents`);
+  return data;
+}
+
+/**
+ * regenerateAllProductEmbeddings
+ * - Fetches all products and regenerates their embeddings with bilingual content
+ * - Call this after updating the product dictionary
+ */
+export async function regenerateAllProductEmbeddings(supabase: SupabaseClient) {
+  console.log('Fetching all products for embedding regeneration...');
+  
+  const { data: products, error } = await supabase
+    .from('products')
+    .select('id, title, description, price, currency, tags, metadata');
+  
+  if (error) {
+    throw new Error(`Failed to fetch products: ${error.message}`);
+  }
+  
+  if (!products || products.length === 0) {
+    console.log('No products found');
+    return [];
+  }
+  
+  console.log(`Found ${products.length} products, regenerating embeddings...`);
+  
+  // Process in batches to avoid rate limits
+  const batchSize = 10;
+  const results: any[] = [];
+  
+  for (let i = 0; i < products.length; i += batchSize) {
+    const batch = products.slice(i, i + batchSize);
+    console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(products.length / batchSize)}`);
+    
+    const batchResults = await upsertProductDocuments(supabase, batch);
+    results.push(...(batchResults || []));
+    
+    // Small delay between batches to avoid rate limits
+    if (i + batchSize < products.length) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  
+  console.log(`Regenerated embeddings for ${results.length} products`);
+  return results;
 }
 
 /**
@@ -458,15 +573,34 @@ export async function handleChat(
     if (supabase) {
       // Common words to skip (not product names)
       const commonWords = [
+        // Arabic common/filler words
         'عايز', 'محتاج', 'ممكن', 'فين', 'كام', 'سعر', 'ايه', 'إيه', 'هل', 'في', 
         'عندكم', 'عندك', 'بكام', 'كم', 'متوفر', 'موجود', 'اشتري', 'اطلب', 'طلب',
-        'the', 'a', 'is', 'what', 'how', 'much', 'price', 'do', 'you', 'have', 'want', 'need'
+        'شكرا', 'شكراً', 'كنت', 'عن', 'اسال', 'أسأل', 'بس', 'بالتس', 'عايزة',
+        'طيب', 'طب', 'او', 'أو', 'ولا', 'يعني', 'كده', 'دي', 'ده', 'دا', 'اللي',
+        'مين', 'ازاي', 'إزاي', 'ليه', 'علشان', 'عشان', 'لو', 'من', 'الى', 'إلى',
+        'انا', 'أنا', 'احنا', 'إحنا', 'انت', 'أنت', 'انتي', 'هو', 'هي', 'هم',
+        // English common words
+        'the', 'a', 'is', 'what', 'how', 'much', 'price', 'do', 'you', 'have', 'want', 'need',
+        'can', 'get', 'show', 'me', 'please', 'thanks', 'thank', 'or', 'and', 'with'
       ];
       
-      // Extract potential product keywords (words 3+ chars that aren't common)
+      // Helper function to deduplicate products by title, keeping highest priced
+      const deduplicateProducts = (prods: any[]) => {
+        const byTitle = new Map<string, any>();
+        for (const p of prods) {
+          const existing = byTitle.get(p.title);
+          if (!existing || (p.price || 0) > (existing.price || 0)) {
+            byTitle.set(p.title, p);
+          }
+        }
+        return Array.from(byTitle.values());
+      };
+      
+      // Extract potential product keywords (words 2+ chars that aren't common)
       const messageWords = userMessage
         .split(/\s+/)
-        .filter(w => w.length >= 3 && !commonWords.includes(w.toLowerCase()))
+        .filter(w => w.length >= 2 && !commonWords.includes(w.toLowerCase()))
         .sort((a, b) => b.length - a.length); // Prioritize longer words
       
       console.log('Product search keywords:', messageWords);
@@ -475,17 +609,43 @@ export async function handleChat(
       if (messageWords.length > 0) {
         // First try: search with the longest/most specific word
         for (const word of messageWords) {
-          const { data: matchedProducts, error: searchErr } = await supabase
+          // Try direct match first, order by price DESC to get highest priced
+          let { data: matchedProducts, error: searchErr } = await supabase
             .from('products')
             .select('id, title, description, price, currency, tags')
             .ilike('title', `%${word}%`)
-            .limit(3);
+            .order('price', { ascending: false })
+            .limit(10);
+          
+          // If no direct match, try Arabic to English translation
+          if (!searchErr && (!matchedProducts || matchedProducts.length === 0)) {
+            const englishTranslations = translateArabicToEnglish(word);
+            console.log(`Translating "${word}" to English:`, englishTranslations);
+            
+            for (const englishTerm of englishTranslations) {
+              const translatedResult = await supabase
+                .from('products')
+                .select('id, title, description, price, currency, tags')
+                .ilike('title', `%${englishTerm}%`)
+                .order('price', { ascending: false })
+                .limit(10);
+              
+              if (!translatedResult.error && translatedResult.data && translatedResult.data.length > 0) {
+                console.log(`Found products via translation "${word}" → "${englishTerm}":`, translatedResult.data.map(p => p.title));
+                matchedProducts = translatedResult.data;
+                break;
+              }
+            }
+          }
           
           if (!searchErr && matchedProducts && matchedProducts.length > 0) {
-            console.log(`Found ${matchedProducts.length} products matching "${word}":`, matchedProducts.map(p => p.title));
+            console.log(`Found ${matchedProducts.length} products matching "${word}":`);
+            matchedProducts.forEach((p, i) => {
+              console.log(`  ${i + 1}. "${p.title}" - Price: ${p.price} ${p.currency || 'EGP'}`);
+            });
             
             // If we found exactly 1 product, that's likely the one they want
-            // If multiple, include all but prioritize exact matches
+            // If multiple, include all but prioritize exact matches and higher prices
             if (matchedProducts.length === 1) {
               products = matchedProducts;
               break;
@@ -501,8 +661,36 @@ export async function handleChat(
                 else score = 40;
                 return { ...p, score };
               });
-              scored.sort((a, b) => b.score - a.score);
-              products = scored.slice(0, 3);
+              // Sort by score first, then by price (higher price = likely featured product)
+              scored.sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                return (b.price || 0) - (a.price || 0);
+              });
+              // Deduplicate by title, keeping highest priced version
+              products = deduplicateProducts(scored).slice(0, 3);
+              console.log(`Selected best match: "${products[0]?.title}" - Price: ${products[0]?.price}`);
+              break;
+            }
+          }
+        }
+        
+        // If still no match, try the full message as a phrase for translation
+        if (products.length === 0) {
+          const fullPhraseTranslations = translateArabicToEnglish(userMessage);
+          console.log(`Full message translation:`, fullPhraseTranslations);
+          
+          for (const englishTerm of fullPhraseTranslations) {
+            const { data: phraseMatched, error: phraseErr } = await supabase
+              .from('products')
+              .select('id, title, description, price, currency, tags')
+              .ilike('title', `%${englishTerm}%`)
+              .order('price', { ascending: false })
+              .limit(10);
+            
+            if (!phraseErr && phraseMatched && phraseMatched.length > 0) {
+              console.log(`Found products via full phrase translation "${englishTerm}":`, phraseMatched.map(p => p.title));
+              // Deduplicate by title, keeping highest priced
+              products = deduplicateProducts(phraseMatched).slice(0, 3);
               break;
             }
           }
@@ -926,12 +1114,22 @@ export interface MatchedProduct {
 }
 
 /**
+ * translateArabicToEnglish
+ * - Wrapper for the productDictionary translateToEnglish function
+ * - Translates Arabic product terms to English equivalents
+ * - Returns array of possible English translations
+ */
+function translateArabicToEnglish(arabicText: string): string[] {
+  return translateToEnglish(arabicText);
+}
+
+/**
  * matchProductsFromCatalog
  * - Queries the products table to find matches for extracted product titles.
  * - Uses ILIKE for case-insensitive partial matching.
+ * - ENHANCED: Supports Arabic to English translation for product matching
  * - Returns matched products with id, title, price, currency, and matched flag.
  * - For unmatched products, returns matched: false with price: 0.
- * - IMPROVED: Better matching logic to avoid returning wrong products
  */
 export async function matchProductsFromCatalog(
   supabase: SupabaseClient,
@@ -955,11 +1153,12 @@ export async function matchProductsFromCatalog(
     }
 
     try {
-      // Step 1: Try exact match first (case-insensitive)
+      // Step 1: Try exact match first (case-insensitive), order by price DESC to get highest priced
       let { data: products, error } = await supabase
         .from('products')
         .select('id, title, price, currency, description')
         .ilike('title', searchTitle)
+        .order('price', { ascending: false })
         .limit(5);
 
       // Step 2: If no exact match, try partial match with wildcards
@@ -968,29 +1167,68 @@ export async function matchProductsFromCatalog(
           .from('products')
           .select('id, title, price, currency, description')
           .ilike('title', `%${searchTitle}%`)
+          .order('price', { ascending: false })
           .limit(5);
         
         products = partialResult.data;
         error = partialResult.error;
       }
 
-      // Step 3: If still no match, try matching with significant words (3+ chars)
-      // But be more careful - only match if the word is significant
+      // Step 3: NEW - Try Arabic to English translation matching
+      if (!error && (!products || products.length === 0)) {
+        const englishTranslations = translateArabicToEnglish(searchTitle);
+        console.log(`Arabic "${searchTitle}" translated to:`, englishTranslations);
+        
+        for (const englishTerm of englishTranslations) {
+          const translatedResult = await supabase
+            .from('products')
+            .select('id, title, price, currency, description')
+            .ilike('title', `%${englishTerm}%`)
+            .order('price', { ascending: false })
+            .limit(5);
+          
+          if (!translatedResult.error && translatedResult.data && translatedResult.data.length > 0) {
+            console.log(`Found products matching "${englishTerm}":`, translatedResult.data.map(p => p.title));
+            products = translatedResult.data;
+            break;
+          }
+        }
+      }
+
+      // Step 4: If still no match, try matching with significant words (3+ chars)
       if (!error && (!products || products.length === 0)) {
         const words = searchTitle.split(/\s+/).filter(w => w.length >= 3);
-        // Sort by length descending to prioritize longer, more specific words
         words.sort((a, b) => b.length - a.length);
         
         for (const word of words) {
-          // Skip common Arabic words that are too generic
           const genericWords = ['عايز', 'محتاج', 'ممكن', 'واحد', 'اتنين', 'تلاتة', 'كام', 'فين', 'ازاي'];
           if (genericWords.includes(word)) continue;
           
-          const wordResult = await supabase
+          // Try direct match first, order by price DESC
+          let wordResult = await supabase
             .from('products')
             .select('id, title, price, currency, description')
             .ilike('title', `%${word}%`)
+            .order('price', { ascending: false })
             .limit(5);
+          
+          // If no direct match, try translating the word
+          if (!wordResult.error && (!wordResult.data || wordResult.data.length === 0)) {
+            const wordTranslations = translateArabicToEnglish(word);
+            for (const translation of wordTranslations) {
+              wordResult = await supabase
+                .from('products')
+                .select('id, title, price, currency, description')
+                .ilike('title', `%${translation}%`)
+                .order('price', { ascending: false })
+                .limit(5);
+              
+              if (!wordResult.error && wordResult.data && wordResult.data.length > 0) {
+                console.log(`Word "${word}" → "${translation}" matched:`, wordResult.data.map(p => p.title));
+                break;
+              }
+            }
+          }
           
           if (!wordResult.error && wordResult.data && wordResult.data.length > 0) {
             products = wordResult.data;
@@ -1013,12 +1251,19 @@ export async function matchProductsFromCatalog(
       }
 
       if (products && products.length > 0) {
+        // Log all found products for debugging
+        console.log(`Found ${products.length} products for "${searchTitle}":`);
+        products.forEach((p, i) => {
+          console.log(`  ${i + 1}. "${p.title}" - Price: ${p.price} ${p.currency || 'EGP'}`);
+        });
+        
         // If multiple products found, find the best match
         let bestMatch = products[0];
         
         if (products.length > 1) {
           // Score each product based on how well it matches the search
           const searchLower = searchTitle.toLowerCase();
+          const englishTerms = translateArabicToEnglish(searchTitle);
           let bestScore = 0;
           
           for (const product of products) {
@@ -1037,8 +1282,17 @@ export async function matchProductsFromCatalog(
             else if (searchLower.includes(titleLower)) {
               score = 70;
             }
-            // Partial word matches
+            // Check English translation matches
             else {
+              for (const englishTerm of englishTerms) {
+                if (titleLower.includes(englishTerm.toLowerCase())) {
+                  score = Math.max(score, 75);
+                }
+              }
+            }
+            
+            // Partial word matches
+            if (score === 0) {
               const searchWords = searchLower.split(/\s+/);
               const titleWords = titleLower.split(/\s+/);
               const matchingWords = searchWords.filter((sw: string) => 
@@ -1047,12 +1301,15 @@ export async function matchProductsFromCatalog(
               score = (matchingWords.length / searchWords.length) * 60;
             }
             
-            if (score > bestScore) {
+            // If scores are equal, prefer higher priced product (likely the featured one)
+            if (score > bestScore || (score === bestScore && (product.price || 0) > (bestMatch.price || 0))) {
               bestScore = score;
               bestMatch = product;
             }
           }
         }
+        
+        console.log(`Best match: "${bestMatch.title}" - Price: ${bestMatch.price} ${bestMatch.currency || 'EGP'}`);
         
         results.push({
           product_id: bestMatch.id,
@@ -1424,6 +1681,8 @@ const agentModule = {
   createSupabaseClient,
   embedText,
   upsertDocuments,
+  upsertProductDocuments,
+  regenerateAllProductEmbeddings,
   querySimilar,
   getAllProducts,
   callChatAnywhere,
@@ -1440,3 +1699,6 @@ const agentModule = {
 };
 
 export default agentModule;
+
+// Re-export product dictionary functions for external use
+export { translateToEnglish, buildSearchQueries, generateBilingualProductText } from './productDictionary';
