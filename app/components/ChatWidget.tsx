@@ -421,7 +421,8 @@ export default function ChatWidget({
       });
       
       if (!res.ok) {
-        throw new Error('فشل في تحميل الفاتورة');
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'فشل في تحميل الفاتورة');
       }
       
       const blob = await res.blob();
@@ -434,7 +435,11 @@ export default function ChatWidget({
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
     } catch (err: any) {
+      console.error('Download error:', err);
       setError(err.message || 'فشل في تحميل الفاتورة');
+      // Fallback: Open print dialog
+      alert('التحميل المباشر فشل. سيتم فتح نافذة الطباعة بدلاً من ذلك.');
+      window.print();
     }
   };
 

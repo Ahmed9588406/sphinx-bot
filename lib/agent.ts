@@ -21,7 +21,7 @@ type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 export function createSupabaseClient(): SupabaseClient | null {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.API_KEY || process.env.SUPABASE_ANON_KEY;
-  
+
   if (!url || !key) {
     console.warn('Supabase not configured — running without vector DB');
     return null;
@@ -149,19 +149,19 @@ export async function upsertProductDocuments(
   for (const product of products) {
     // Generate bilingual content for better Arabic matching
     const bilingualContent = generateBilingualProductText(product);
-    
+
     // Also include price info for context
-    const fullContent = product.price 
+    const fullContent = product.price
       ? `${bilingualContent} السعر: ${product.price} ${product.currency || 'EGP'}`
       : bilingualContent;
-    
+
     console.log(`Generating bilingual embedding for: ${product.title}`);
-    
+
     const emb = await embedText(fullContent);
     if (emb.length !== dim) {
       console.warn(`embedding dim ${emb.length} does not match EMBEDDING_DIM ${dim}`);
     }
-    
+
     rows.push({
       content: fullContent,
       metadata: {
@@ -178,7 +178,7 @@ export async function upsertProductDocuments(
 
   // Upsert documents (delete existing product docs first to avoid duplicates)
   const productIds = products.map(p => p.id);
-  
+
   // Delete existing documents for these products
   await supabase
     .from('documents')
@@ -188,7 +188,7 @@ export async function upsertProductDocuments(
   // Insert new documents
   const { data, error } = await supabase.from('documents').insert(rows).select('*');
   if (error) throw error;
-  
+
   console.log(`Upserted ${rows.length} bilingual product documents`);
   return data;
 }
@@ -200,39 +200,39 @@ export async function upsertProductDocuments(
  */
 export async function regenerateAllProductEmbeddings(supabase: SupabaseClient) {
   console.log('Fetching all products for embedding regeneration...');
-  
+
   const { data: products, error } = await supabase
     .from('products')
     .select('id, title, description, price, currency, tags, metadata');
-  
+
   if (error) {
     throw new Error(`Failed to fetch products: ${error.message}`);
   }
-  
+
   if (!products || products.length === 0) {
     console.log('No products found');
     return [];
   }
-  
+
   console.log(`Found ${products.length} products, regenerating embeddings...`);
-  
+
   // Process in batches to avoid rate limits
   const batchSize = 10;
   const results: any[] = [];
-  
+
   for (let i = 0; i < products.length; i += batchSize) {
     const batch = products.slice(i, i + batchSize);
     console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(products.length / batchSize)}`);
-    
+
     const batchResults = await upsertProductDocuments(supabase, batch);
     results.push(...(batchResults || []));
-    
+
     // Small delay between batches to avoid rate limits
     if (i + batchSize < products.length) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
-  
+
   console.log(`Regenerated embeddings for ${results.length} products`);
   return results;
 }
@@ -245,7 +245,7 @@ export async function regenerateAllProductEmbeddings(supabase: SupabaseClient) {
  */
 export async function querySimilar(supabase: SupabaseClient | null, text: string, k = 5) {
   if (!supabase) return [];
-  
+
   try {
     const emb = await embedText(text);
     const { data, error } = await supabase.rpc('match_documents', {
@@ -257,7 +257,7 @@ export async function querySimilar(supabase: SupabaseClient | null, text: string
       console.error('Supabase RPC error:', error.message);
       return [];
     }
-    
+
     // Filter out results with very low scores (likely zero-vector placeholders)
     const filtered = (data || []).filter((d: any) => d.score > 0.1);
     return filtered as Array<{ id: string; content: string; metadata: any; score: number }>;
@@ -274,7 +274,7 @@ export async function querySimilar(supabase: SupabaseClient | null, text: string
  */
 export async function getAllProducts(supabase: SupabaseClient | null, limit = 20) {
   if (!supabase) return [];
-  
+
   try {
     const resolvedLimit = Number(process.env.PRODUCT_LIST_LIMIT || limit || 100);
     const { data, error } = await supabase
@@ -282,7 +282,7 @@ export async function getAllProducts(supabase: SupabaseClient | null, limit = 20
       .select('id, title, description, price, currency, tags, product_images(*)')
       .order('created_at', { ascending: false })
       .limit(resolvedLimit);
-    
+
     if (error) {
       console.error('getAllProducts error:', error.message);
       return [];
@@ -337,7 +337,7 @@ export async function getAllProductsAll(supabase: SupabaseClient | null) {
 export async function callChatAnywhere(messages: ChatMessage[], model?: string): Promise<string> {
   const apiKey = process.env.CHAT_ANYWHERE_API_KEY;
   const url = process.env.CHAT_ANYWHERE_API_URL || 'https://api.chatanywhere.tech/v1/chat/completions';
-  
+
   if (!apiKey) throw new Error('Missing CHAT_ANYWHERE_API_KEY');
 
   const body = {
@@ -363,11 +363,11 @@ export async function callChatAnywhere(messages: ChatMessage[], model?: string):
 
   const j = (await res.json()) as { choices?: Array<{ message?: { content?: string }; text?: string }> };
   const content = j.choices?.[0]?.message?.content || j.choices?.[0]?.text;
-  
+
   if (!content) {
     throw new Error('No content in ChatAnywhere response');
   }
-  
+
   return content;
 }
 
@@ -380,11 +380,11 @@ export async function callChatAnywhere(messages: ChatMessage[], model?: string):
  * - Integrates product matching for order creation.
  */
 export async function handleChat(
-  supabase: SupabaseClient | null, 
-  userMessage: string, 
+  supabase: SupabaseClient | null,
+  userMessage: string,
   options?: { customerContext?: string; conversationHistory?: ChatMessage[]; userId?: string; userName?: string; page?: number; offset?: number, conversationId?: string; }
 ): Promise<any> {
-  
+
   // Detect if user is asking to list ALL products (not a specific product)
   // These are phrases that specifically ask for a list of all products
   const productListingPhrases = [
@@ -394,32 +394,32 @@ export async function handleChat(
     'الكاتالوج', 'قائمة المنتجات', 'اعرض المنتجات', 'عرض المنتجات',
     'list all', 'show all', 'all products', 'what do you have', 'what do you sell'
   ];
-  
+
   // Check if the message is asking for ALL products (not a specific one)
   const normalizedMsg = userMessage.toLowerCase().trim();
-  const isProductListingQuery = productListingPhrases.some(phrase => 
+  const isProductListingQuery = productListingPhrases.some(phrase =>
     normalizedMsg.includes(phrase.toLowerCase())
   ) || (
-    // Also match short generic queries like "المنتجات" alone
-    ['المنتجات', 'منتجات', 'products'].includes(normalizedMsg)
-  );
+      // Also match short generic queries like "المنتجات" alone
+      ['المنتجات', 'منتجات', 'products'].includes(normalizedMsg)
+    );
 
   // Get the last assistant message to check for draft order context
   const lastMessage = options?.conversationHistory?.[options.conversationHistory.length - 1];
-  const hasDraftOrderContext = lastMessage?.role === 'assistant' && 
+  const hasDraftOrderContext = lastMessage?.role === 'assistant' &&
     (lastMessage.content.includes('تأكيد الطلب') || lastMessage.content.includes('هل تأكد الطلب'));
 
   // >>> Cancellation Detection (Task 4.1)
   // Arabic and English cancellation phrases
   const cancelKeywords = [
-    'لا', 'إلغاء', 'الغاء', 'cancel', 'no', 'مش عايز', 'مش عاوز', 
+    'لا', 'إلغاء', 'الغاء', 'cancel', 'no', 'مش عايز', 'مش عاوز',
     'لأ', 'الغي', 'ألغي', 'كنسل', 'لا شكرا', 'لا شكراً', 'مش محتاج',
     'لا اريد', 'لا أريد', 'ارجع', 'تراجع', 'stop', 'nevermind', 'never mind'
   ];
-  
+
   const normalizedMessage = userMessage.toLowerCase().trim();
-  const isCancellation = cancelKeywords.some(kw => 
-    normalizedMessage === kw.toLowerCase() || 
+  const isCancellation = cancelKeywords.some(kw =>
+    normalizedMessage === kw.toLowerCase() ||
     normalizedMessage.startsWith(kw.toLowerCase() + ' ') ||
     normalizedMessage.endsWith(' ' + kw.toLowerCase())
   );
@@ -444,7 +444,7 @@ export async function handleChat(
       // Task 7.2: Database error handling with Arabic messages and logging
       const errorMessage = error?.message || 'Unknown error';
       console.error('Cancellation error:', errorMessage);
-      
+
       return {
         reply: '⚠️ حصل مشكلة أثناء إلغاء الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
         mode: 'simple',
@@ -475,14 +475,14 @@ export async function handleChat(
     try {
       // Use the confirmOrder function (Task 4.4)
       const confirmResult = await confirmOrder(supabase, options.userId);
-      
+
       if (confirmResult.success) {
         // Fetch order items with product details for receipt
         const { data: orderItemsWithProducts } = await supabase
           .from('order_items')
           .select('*, products(id, title, description, price, currency)')
           .eq('order_id', confirmResult.order.id);
-        
+
         return {
           reply: `✅ تم تأكيد طلبك بنجاح! 🎉\nرقم الطلب: ${confirmResult.order.metadata?.order_number || confirmResult.order.id}\nشكراً لاختيارك Sphinx Fit!`,
           confirmedOrder: {
@@ -496,18 +496,18 @@ export async function handleChat(
       // Task 7.2: Database error handling with Arabic messages and logging
       const errorMessage = error?.message || 'Unknown error';
       console.error('Confirmation error:', errorMessage);
-      
+
       // Task 7.3: Handle no draft order scenario
       if (errorMessage.includes('No draft order')) {
-        return { 
+        return {
           reply: '⚠️ لم أجد طلبًا معلقًا لتأكيده.\n\nلو عايز تطلب حاجة، قولي اسم المنتج والكمية وأنا هساعدك! 😊',
           mode: 'simple',
           error: { type: 'no_draft_order' }
         };
       }
-      
+
       // Task 7.4: Order confirmation failure handling
-      return { 
+      return {
         reply: '⚠️ حصل مشكلة أثناء تأكيد الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
         mode: 'simple',
         error: {
@@ -523,7 +523,7 @@ export async function handleChat(
   // 1. Get context based on query type
   let docs: any[] = [];
   let products: any[] = [];
-  
+
   try {
     // For product listing queries, support paging so replies are not enormous.
     if (isProductListingQuery && supabase) {
@@ -574,7 +574,7 @@ export async function handleChat(
       // Common words to skip (not product names)
       const commonWords = [
         // Arabic common/filler words
-        'عايز', 'محتاج', 'ممكن', 'فين', 'كام', 'سعر', 'ايه', 'إيه', 'هل', 'في', 
+        'عايز', 'محتاج', 'ممكن', 'فين', 'كام', 'سعر', 'ايه', 'إيه', 'هل', 'في',
         'عندكم', 'عندك', 'بكام', 'كم', 'متوفر', 'موجود', 'اشتري', 'اطلب', 'طلب',
         'شكرا', 'شكراً', 'كنت', 'عن', 'اسال', 'أسأل', 'بس', 'بالتس', 'عايزة',
         'طيب', 'طب', 'او', 'أو', 'ولا', 'يعني', 'كده', 'دي', 'ده', 'دا', 'اللي',
@@ -584,7 +584,7 @@ export async function handleChat(
         'the', 'a', 'is', 'what', 'how', 'much', 'price', 'do', 'you', 'have', 'want', 'need',
         'can', 'get', 'show', 'me', 'please', 'thanks', 'thank', 'or', 'and', 'with'
       ];
-      
+
       // Helper function to deduplicate products by title, keeping highest priced
       const deduplicateProducts = (prods: any[]) => {
         const byTitle = new Map<string, any>();
@@ -596,15 +596,15 @@ export async function handleChat(
         }
         return Array.from(byTitle.values());
       };
-      
+
       // Extract potential product keywords (words 2+ chars that aren't common)
       const messageWords = userMessage
         .split(/\s+/)
         .filter(w => w.length >= 2 && !commonWords.includes(w.toLowerCase()))
         .sort((a, b) => b.length - a.length); // Prioritize longer words
-      
+
       console.log('Product search keywords:', messageWords);
-      
+
       // Try to find products matching keywords
       if (messageWords.length > 0) {
         // First try: search with the longest/most specific word
@@ -616,12 +616,12 @@ export async function handleChat(
             .ilike('title', `%${word}%`)
             .order('price', { ascending: false })
             .limit(10);
-          
+
           // If no direct match, try Arabic to English translation
           if (!searchErr && (!matchedProducts || matchedProducts.length === 0)) {
             const englishTranslations = translateArabicToEnglish(word);
             console.log(`Translating "${word}" to English:`, englishTranslations);
-            
+
             for (const englishTerm of englishTranslations) {
               const translatedResult = await supabase
                 .from('products')
@@ -629,7 +629,7 @@ export async function handleChat(
                 .ilike('title', `%${englishTerm}%`)
                 .order('price', { ascending: false })
                 .limit(10);
-              
+
               if (!translatedResult.error && translatedResult.data && translatedResult.data.length > 0) {
                 console.log(`Found products via translation "${word}" → "${englishTerm}":`, translatedResult.data.map(p => p.title));
                 matchedProducts = translatedResult.data;
@@ -637,13 +637,13 @@ export async function handleChat(
               }
             }
           }
-          
+
           if (!searchErr && matchedProducts && matchedProducts.length > 0) {
             console.log(`Found ${matchedProducts.length} products matching "${word}":`);
             matchedProducts.forEach((p, i) => {
               console.log(`  ${i + 1}. "${p.title}" - Price: ${p.price} ${p.currency || 'EGP'}`);
             });
-            
+
             // If we found exactly 1 product, that's likely the one they want
             // If multiple, include all but prioritize exact matches and higher prices
             if (matchedProducts.length === 1) {
@@ -673,12 +673,12 @@ export async function handleChat(
             }
           }
         }
-        
+
         // If still no match, try the full message as a phrase for translation
         if (products.length === 0) {
           const fullPhraseTranslations = translateArabicToEnglish(userMessage);
           console.log(`Full message translation:`, fullPhraseTranslations);
-          
+
           for (const englishTerm of fullPhraseTranslations) {
             const { data: phraseMatched, error: phraseErr } = await supabase
               .from('products')
@@ -686,7 +686,7 @@ export async function handleChat(
               .ilike('title', `%${englishTerm}%`)
               .order('price', { ascending: false })
               .limit(10);
-            
+
             if (!phraseErr && phraseMatched && phraseMatched.length > 0) {
               console.log(`Found products via full phrase translation "${englishTerm}":`, phraseMatched.map(p => p.title));
               // Deduplicate by title, keeping highest priced
@@ -696,7 +696,7 @@ export async function handleChat(
           }
         }
       }
-      
+
       // If no specific products found, try vector search
       if (products.length === 0) {
         docs = await querySimilar(supabase, userMessage, 5);
@@ -728,7 +728,7 @@ export async function handleChat(
 
   // 3. Format context
   let contextText = '';
-  
+
   // Add products list if available (from specific product search)
   if (products.length > 0) {
     contextText += '\n\n📦 المنتجات المطابقة للبحث:\n';
@@ -741,20 +741,20 @@ export async function handleChat(
     });
     contextText += '\n⚠️ رد فقط بالمنتجات المذكورة أعلاه. لا تذكر منتجات أخرى.';
   }
-  
+
   // Add vector search results if available (and no specific products found)
   if (docs.length > 0 && products.length === 0) {
     // Extract product info from vector search results
     const productDocs = docs.filter(d => d.metadata?.product_id || d.content?.includes('EGP') || d.content?.includes('جنيه'));
     const otherDocs = docs.filter(d => !d.metadata?.product_id && !d.content?.includes('EGP') && !d.content?.includes('جنيه'));
-    
+
     if (productDocs.length > 0) {
-      contextText += '\n\n📦 معلومات المنتجات:\n' + 
+      contextText += '\n\n📦 معلومات المنتجات:\n' +
         productDocs.map(d => `- ${d.content}`).join('\n');
     }
-    
+
     if (otherDocs.length > 0) {
-      contextText += '\n\nمعلومات إضافية:\n' + 
+      contextText += '\n\nمعلومات إضافية:\n' +
         otherDocs.map(d => `- ${d.content}`).join('\n');
     }
   }
@@ -772,22 +772,22 @@ export async function handleChat(
   }
 
   // Add customer context if provided
-  const userContent = options?.customerContext 
+  const userContent = options?.customerContext
     ? `[معلومات العميل: ${options.customerContext}]\n\n${userMessage}`
     : userMessage;
-  
+
   messages.push({ role: 'user', content: userContent });
 
   // 5. Call ChatAnywhere
   const reply = await callChatAnywhere(messages);
-  
+
   // 6. Try to detect an order intent and extract order details using the LLM
   try {
     const orderDetails = await extractOrderDetails(userMessage);
-    
+
     // If we found items and have a supabase client, check authentication and create a DRAFT order
     if (orderDetails && orderDetails.isOrderIntent && Array.isArray(orderDetails.items) && orderDetails.items.length > 0 && supabase) {
-      
+
       // Task 7.1: Authentication check for order operations
       // Return Arabic prompt to log in if not authenticated
       if (!options?.userId) {
@@ -797,27 +797,29 @@ export async function handleChat(
           requiresAuth: true
         };
       }
-      
+
       // Task 4.2: Use matchProductsFromCatalog for product matching
       const matchedProducts = await matchProductsFromCatalog(supabase, orderDetails.items);
-      
+
       // Log matched products for debugging
       console.log('Matched products:', JSON.stringify(matchedProducts, null, 2));
       console.log('Order details items:', JSON.stringify(orderDetails.items, null, 2));
-      
+
       // Check for unmatched products and handle gracefully
       const unmatchedProducts = matchedProducts.filter(p => !p.matched);
       const hasUnmatchedProducts = unmatchedProducts.length > 0;
-      
+
       // Build draft order items from matched products
       // Ensure quantity is taken from the correct extracted item
       const draftItems: DraftOrderItem[] = matchedProducts.map((mp, idx) => {
         const extractedItem = orderDetails.items[idx];
         const quantity = extractedItem?.quantity || 1;
-        const price = mp.price || 0;
-        
-        console.log(`Item ${idx}: ${mp.title}, qty: ${quantity}, price: ${price}, total: ${price * quantity}`);
-        
+
+        // Priority for price: 1. Matched product price, 2. Extracted price from user, 3. fallback 0
+        const price = mp.matched ? mp.price : (extractedItem?.unit_price || 0);
+
+        console.log(`Item ${idx}: ${mp.title}, qty: ${quantity}, price: ${price}, total: ${price * quantity} (Extracted price: ${extractedItem?.unit_price})`);
+
         return {
           product_id: mp.product_id,
           product_title: mp.matched ? mp.title : mp.original_query,
@@ -825,7 +827,7 @@ export async function handleChat(
           price: price
         };
       });
-      
+
       // Calculate total for verification
       const calculatedTotal = draftItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
       console.log('Calculated total:', calculatedTotal);
@@ -843,23 +845,23 @@ export async function handleChat(
         // Build order summary with matched product details
         const receiptLines: string[] = [];
         receiptLines.push('📦 **ملخص الطلب:**');
-        
+
         draftItems.forEach((item, idx) => {
           const matchedProduct = matchedProducts[idx];
           const lineTotal = item.price * item.quantity;
           const matchStatus = matchedProduct.matched ? '' : ' ⚠️ (غير متوفر)';
           receiptLines.push(`${idx + 1}. ${item.product_title} × ${item.quantity} = ${lineTotal.toFixed(0)} EGP${matchStatus}`);
         });
-        
+
         receiptLines.push('');
         receiptLines.push(`**المجموع:** ${draftResult.total.toFixed(0)} EGP`);
-        
+
         // Add warning for unmatched products
         if (hasUnmatchedProducts) {
           receiptLines.push('');
           receiptLines.push('⚠️ **ملاحظة:** بعض المنتجات غير متوفرة حالياً وسيتم مراجعتها.');
         }
-        
+
         // Add shipping details if provided
         if (orderDetails.shipping) {
           receiptLines.push('');
@@ -876,8 +878,8 @@ export async function handleChat(
         const finalReply = reply + '\n\n' + receiptText + confirmPrompt;
 
         // Return response with draftOrder in payload
-        return { 
-          reply: finalReply, 
+        return {
+          reply: finalReply,
           docs: products.length > 0 ? products : docs,
           mode: 'rag',
           draftOrder: {
@@ -897,7 +899,7 @@ export async function handleChat(
       } catch (draftError: any) {
         // Task 7.2: Database error handling with Arabic messages
         console.error('Failed to create draft order:', draftError.message);
-        
+
         // Return user-friendly Arabic error message
         return {
           reply: '⚠️ حصل مشكلة أثناء إنشاء الطلب. يرجى المحاولة مرة أخرى.\n\nلو المشكلة استمرت، تواصل معانا على الإنستجرام.',
@@ -913,7 +915,7 @@ export async function handleChat(
     // Task 7.2: Log errors for debugging
     const errorMessage = e instanceof Error ? e.message : String(e);
     console.error('Order extraction/creation failed:', errorMessage);
-    
+
     // Continue with normal reply if extraction fails (non-critical)
   }
 
@@ -955,7 +957,7 @@ export function calculateOrderTotal(items: OrderItemForTotal[]): number {
   if (!items || items.length === 0) {
     return 0;
   }
-  
+
   return items.reduce((total, item) => {
     const price = Number(item.price) || 0;
     const quantity = Number(item.quantity) || 0;
@@ -1028,13 +1030,13 @@ export async function createDraftOrder(
 ): Promise<DraftOrderResult> {
   // Generate unique order number
   const orderNumber = generateOrderNumber();
-  
+
   // Calculate total from items
   const total = calculateOrderTotal(items.map(item => ({
     price: item.price,
     quantity: item.quantity
   })));
-  
+
   // Create order record
   const orderRecord = {
     user_id: userId,
@@ -1048,17 +1050,17 @@ export async function createDraftOrder(
       customer_name: customerName || undefined
     }
   };
-  
+
   const { data: order, error: orderError } = await supabase
     .from('orders')
     .insert(orderRecord)
     .select()
     .single();
-  
+
   if (orderError) {
     throw new Error(`Failed to create draft order: ${orderError.message}`);
   }
-  
+
   // Create order items records
   const orderItemsRecords = items.map(item => ({
     order_id: order.id,
@@ -1067,18 +1069,18 @@ export async function createDraftOrder(
     price: item.price,
     metadata: {}
   }));
-  
+
   const { data: orderItems, error: itemsError } = await supabase
     .from('order_items')
     .insert(orderItemsRecords)
     .select();
-  
+
   if (itemsError) {
     // Rollback: delete the order if items insertion fails
     await supabase.from('orders').delete().eq('id', order.id);
     throw new Error(`Failed to create order items: ${itemsError.message}`);
   }
-  
+
   return {
     order: order as Order,
     orderItems: orderItems as OrderItem[],
@@ -1133,13 +1135,13 @@ function translateArabicToEnglish(arabicText: string): string[] {
  */
 export async function matchProductsFromCatalog(
   supabase: SupabaseClient,
-  extractedItems: Array<{ product_title: string; quantity: number }>
+  extractedItems: Array<{ product_title: string; quantity: number; unit_price?: number }>
 ): Promise<MatchedProduct[]> {
   const results: MatchedProduct[] = [];
 
   for (const item of extractedItems) {
     const searchTitle = item.product_title.trim();
-    
+
     if (!searchTitle) {
       results.push({
         product_id: null,
@@ -1169,24 +1171,24 @@ export async function matchProductsFromCatalog(
           .ilike('title', `%${searchTitle}%`)
           .order('price', { ascending: false })
           .limit(5);
-        
+
         products = partialResult.data;
         error = partialResult.error;
       }
 
       // Step 3: NEW - Try Arabic to English translation matching
       if (!error && (!products || products.length === 0)) {
-        const englishTranslations = translateArabicToEnglish(searchTitle);
+        const englishTranslations = translateArabicToEnglish(searchTitle).filter(t => t.length > 2);
         console.log(`Arabic "${searchTitle}" translated to:`, englishTranslations);
-        
+
         for (const englishTerm of englishTranslations) {
           const translatedResult = await supabase
             .from('products')
             .select('id, title, price, currency, description')
             .ilike('title', `%${englishTerm}%`)
-            .order('price', { ascending: false })
+            .order('price', { ascending: false }) // Reverted to DESC to find higher-priced "primary" versions first
             .limit(5);
-          
+
           if (!translatedResult.error && translatedResult.data && translatedResult.data.length > 0) {
             console.log(`Found products matching "${englishTerm}":`, translatedResult.data.map(p => p.title));
             products = translatedResult.data;
@@ -1199,11 +1201,11 @@ export async function matchProductsFromCatalog(
       if (!error && (!products || products.length === 0)) {
         const words = searchTitle.split(/\s+/).filter(w => w.length >= 3);
         words.sort((a, b) => b.length - a.length);
-        
+
         for (const word of words) {
           const genericWords = ['عايز', 'محتاج', 'ممكن', 'واحد', 'اتنين', 'تلاتة', 'كام', 'فين', 'ازاي'];
           if (genericWords.includes(word)) continue;
-          
+
           // Try direct match first, order by price DESC
           let wordResult = await supabase
             .from('products')
@@ -1211,7 +1213,7 @@ export async function matchProductsFromCatalog(
             .ilike('title', `%${word}%`)
             .order('price', { ascending: false })
             .limit(5);
-          
+
           // If no direct match, try translating the word
           if (!wordResult.error && (!wordResult.data || wordResult.data.length === 0)) {
             const wordTranslations = translateArabicToEnglish(word);
@@ -1222,14 +1224,14 @@ export async function matchProductsFromCatalog(
                 .ilike('title', `%${translation}%`)
                 .order('price', { ascending: false })
                 .limit(5);
-              
+
               if (!wordResult.error && wordResult.data && wordResult.data.length > 0) {
                 console.log(`Word "${word}" → "${translation}" matched:`, wordResult.data.map(p => p.title));
                 break;
               }
             }
           }
-          
+
           if (!wordResult.error && wordResult.data && wordResult.data.length > 0) {
             products = wordResult.data;
             break;
@@ -1256,61 +1258,81 @@ export async function matchProductsFromCatalog(
         products.forEach((p, i) => {
           console.log(`  ${i + 1}. "${p.title}" - Price: ${p.price} ${p.currency || 'EGP'}`);
         });
-        
+
         // If multiple products found, find the best match
         let bestMatch = products[0];
-        
+
         if (products.length > 1) {
-          // Score each product based on how well it matches the search
+          // Score each product based on how well it matches the search and user price
           const searchLower = searchTitle.toLowerCase();
           const englishTerms = translateArabicToEnglish(searchTitle);
-          let bestScore = 0;
-          
+          const targetPrice = item.unit_price;
+          let bestScore = -1;
+
           for (const product of products) {
             const titleLower = product.title.toLowerCase();
             let score = 0;
-            
+
             // Exact match gets highest score
             if (titleLower === searchLower) {
-              score = 100;
+              score += 100;
             }
             // Title contains full search term
             else if (titleLower.includes(searchLower)) {
-              score = 80;
+              score += 80;
             }
             // Search term contains full title
             else if (searchLower.includes(titleLower)) {
-              score = 70;
+              score += 70;
             }
             // Check English translation matches
             else {
               for (const englishTerm of englishTerms) {
                 if (titleLower.includes(englishTerm.toLowerCase())) {
-                  score = Math.max(score, 75);
+                  score += 75;
+                  break;
                 }
               }
             }
-            
+
+            // Price matching bonus
+            if (targetPrice && product.price) {
+              const priceDiff = Math.abs(product.price - targetPrice);
+              if (priceDiff < 1) score += 50; // Exact price match
+              else if (priceDiff < 50) score += 20; // Close price match
+            }
+
             // Partial word matches
             if (score === 0) {
               const searchWords = searchLower.split(/\s+/);
               const titleWords = titleLower.split(/\s+/);
-              const matchingWords = searchWords.filter((sw: string) => 
+              const matchingWords = searchWords.filter((sw: string) =>
                 titleWords.some((tw: string) => tw.includes(sw) || sw.includes(tw))
               );
-              score = (matchingWords.length / searchWords.length) * 60;
+              score += (matchingWords.length / Math.max(1, searchWords.length)) * 60;
             }
-            
-            // If scores are equal, prefer higher priced product (likely the featured one)
-            if (score > bestScore || (score === bestScore && (product.price || 0) > (bestMatch.price || 0))) {
+
+            // Prefer middle-priced items if no target price, 
+            // or items closer to target if it exists
+            if (score > bestScore) {
               bestScore = score;
               bestMatch = product;
+            } else if (score === bestScore) {
+              // Tie-breaker
+              if (targetPrice) {
+                const currentDiff = Math.abs(bestMatch.price - targetPrice);
+                const newDiff = Math.abs(product.price - targetPrice);
+                if (newDiff < currentDiff) bestMatch = product;
+              } else {
+                // Without target price, prefer the one with more content or more "standard" price
+                if ((product.price || 0) > (bestMatch.price || 0)) bestMatch = product; // Prefer higher as "primary" model
+              }
             }
           }
         }
-        
-        console.log(`Best match: "${bestMatch.title}" - Price: ${bestMatch.price} ${bestMatch.currency || 'EGP'}`);
-        
+
+        console.log(`Best match: "${bestMatch.title}" - Price: ${bestMatch.price} ${bestMatch.currency || 'EGP'} (Target: ${item.unit_price})`);
+
         results.push({
           product_id: bestMatch.id,
           title: bestMatch.title,
@@ -1350,18 +1372,40 @@ export async function matchProductsFromCatalog(
  * Pure function that parses the LLM response into structured order details.
  * This function is separated for testability.
  */
+/**
+ * parseOrderDetailsResponse
+ * Pure function that parses the LLM response into structured order details.
+ * Enhanced to handle Arabic decoding and potential Unicode escapes.
+ */
 export function parseOrderDetailsResponse(rawResponse: string): ExtractedOrderDetails {
+  // Helper to safely clean and decode strings
+  const cleanString = (s: any): string => {
+    if (typeof s !== 'string') return '';
+    try {
+      // Handle escaped unicode if it appears as literal characters (e.g. \u062a)
+      return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    } catch {
+      return s;
+    }
+  };
+
   // Try to parse JSON from response
   try {
-    const j = JSON.parse(rawResponse.trim());
+    const trimmed = rawResponse.trim();
+    const j = JSON.parse(trimmed);
+
     // Ensure isOrderIntent is set
     const result: ExtractedOrderDetails = {
       items: Array.isArray(j.items) ? j.items.map((item: any) => ({
-        product_title: item.product_title || item.title || '',
+        product_title: cleanString(item.product_title || item.title || ''),
         quantity: Number(item.quantity) || 1,
-        unit_price: item.unit_price
+        unit_price: Number(item.unit_price) || undefined
       })) : [],
-      shipping: j.shipping || undefined,
+      shipping: j.shipping ? {
+        name: cleanString(j.shipping.name) || undefined,
+        phone: cleanString(j.shipping.phone) || undefined,
+        address: cleanString(j.shipping.address) || undefined
+      } : undefined,
       isOrderIntent: Boolean(j.isOrderIntent || (j.items && j.items.length > 0))
     };
     return result;
@@ -1369,21 +1413,25 @@ export function parseOrderDetailsResponse(rawResponse: string): ExtractedOrderDe
     // Try to extract JSON substring
     const m = rawResponse.match(/\{[\s\S]*\}/);
     if (m) {
-      try { 
+      try {
         const j = JSON.parse(m[0]);
         const result: ExtractedOrderDetails = {
           items: Array.isArray(j.items) ? j.items.map((item: any) => ({
-            product_title: item.product_title || item.title || '',
+            product_title: cleanString(item.product_title || item.title || ''),
             quantity: Number(item.quantity) || 1,
-            unit_price: item.unit_price
+            unit_price: Number(item.unit_price) || undefined
           })) : [],
-          shipping: j.shipping || undefined,
+          shipping: j.shipping ? {
+            name: cleanString(j.shipping.name) || undefined,
+            phone: cleanString(j.shipping.phone) || undefined,
+            address: cleanString(j.shipping.address) || undefined
+          } : undefined,
           isOrderIntent: Boolean(j.isOrderIntent || (j.items && j.items.length > 0))
         };
         return result;
-      } catch (e) { 
+      } catch (e) {
         console.error('JSON parse error:', e);
-        return { items: [], isOrderIntent: false }; 
+        return { items: [], isOrderIntent: false };
       }
     }
     console.warn('Could not extract JSON from:', rawResponse.slice(0, 200));
@@ -1441,10 +1489,10 @@ ${userMessage}
 أرجع JSON فقط بدون أي نص إضافي:`;
 
   const raw = await callChatAnywhere([
-    { role: 'system', content: 'أنت متخصص استخراج بيانات JSON. أرد فقط بـ JSON صحيح بدون تعليقات.' }, 
+    { role: 'system', content: 'أنت متخصص استخراج بيانات JSON. أرد فقط بـ JSON صحيح بدون تعليقات.' },
     { role: 'user', content: prompt }
   ], process.env.CHAT_MODEL || undefined);
-  
+
   return parseOrderDetailsResponse(raw);
 }
 
@@ -1474,7 +1522,7 @@ export async function getPersonalizedRecommendations(supabase: SupabaseClient, u
       .select('id')
       .eq('user_id', userId)
       .eq('status', 'confirmed');
-      
+
     if (ordersError) throw new Error(`Failed to fetch user's orders: ${ordersError.message}`);
     if (!orders || orders.length === 0) return [];
 
@@ -1500,7 +1548,7 @@ export async function getPersonalizedRecommendations(supabase: SupabaseClient, u
       .in('id', Array.from(purchasedProductIds));
 
     if (productsError) throw new Error(`Failed to fetch product details: ${productsError.message}`);
-    
+
     // 4. Create a "taste profile" string.
     const tasteProfile = (purchasedProducts || []).map(p => `${p.title} ${p.tags?.join(' ')} ${p.description}`).join('\n');
     if (!tasteProfile) {
@@ -1586,9 +1634,9 @@ export async function confirmOrder(
   // Update order status to 'confirmed' and update timestamp
   const { data: confirmedOrder, error: updateError } = await supabase
     .from('orders')
-    .update({ 
-      status: 'confirmed', 
-      updated_at: new Date().toISOString() 
+    .update({
+      status: 'confirmed',
+      updated_at: new Date().toISOString()
     })
     .eq('id', draftOrder.id)
     .select()
@@ -1655,9 +1703,9 @@ export async function cancelOrder(
   // Update order status to 'cancelled' and update timestamp
   const { data: cancelledOrder, error: updateError } = await supabase
     .from('orders')
-    .update({ 
-      status: 'cancelled', 
-      updated_at: new Date().toISOString() 
+    .update({
+      status: 'cancelled',
+      updated_at: new Date().toISOString()
     })
     .eq('id', draftOrder.id)
     .select()
